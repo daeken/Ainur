@@ -10,11 +10,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
  *   GET <base>/{id}/frame    one-shot latest frame (same `frame` payload)
  *   GET <base>               index: JSON array of `session` payloads
  *
- * `base` is chosen at runtime from `?browserStream=<url>` (so the panel can be pointed at a contract
- * fixture without a rebuild), else build-time `VITE_BROWSER_STREAM`; the literal value `mock` forces
- * the local generator. DELIBERATE DEVIATION from the contract: its stated default base is
- * `/api/v1/browser/sessions`, but the server route does not exist yet (Tulkas owns it), so an unset
- * value means MOCK rather than a stream that can only 404.
+ * `base` defaults to the contract's same-origin route `/api/v1/browser/sessions` — there is NO fake
+ * activity by default: if the route is absent the panel honestly reports the no-session / route
+ * unavailable state. The local generator is an explicit, labelled opt-in for tests and demos only:
+ * `?browserStream=mock` on the UI URL, or a build-time `VITE_BROWSER_STREAM=mock`. Any other value of
+ * either switches to that URL (so the panel can be pointed at a contract fixture without a rebuild).
+ * Resolution order: query parameter, then `VITE_BROWSER_STREAM`, then the default route.
  *
  * Contract points implemented here:
  *  - `frame.seq` is monotonic; a lower seq is ignored (replay-on-connect must not rewind the view).
@@ -76,12 +77,15 @@ const POLL_MS = 5000
  *  an error co-delivered with a frame in the same network read would otherwise flash for 0 ms. */
 const MIN_NOTICE_MS = 1000
 
-/** Runtime override beats build-time env; `mock` (or unset) selects the local generator. */
+/** The contract's default, same-origin: the server route owned by Tulkas. */
+const DEFAULT_BASE = '/api/v1/browser/sessions'
+
+/** Query parameter overrides build-time env overrides the real default; `mock` = local generator. */
 function runtimeBase(): string | undefined {
   let fromQuery: string | null = null
   try { fromQuery = new URLSearchParams(window.location.search).get('browserStream') } catch { fromQuery = null }
-  const raw = fromQuery ?? ENV_BASE
-  if (!raw || raw === 'mock') return undefined
+  const raw = (fromQuery ?? ENV_BASE ?? DEFAULT_BASE).trim()
+  if (raw === '' || raw === 'mock') return undefined // explicit opt-in to the labelled mock source
   return raw.replace(/\/+$/, '')
 }
 
@@ -229,32 +233,39 @@ function parseData<T>(e: Event): T | undefined {
 
 type Target = { kind: 'stream'; id: string } | { kind: 'poll'; detail: string } | { kind: 'stop'; detail: string }
 
+type Resolution = { target: Target; /** true when the index route answered 404/405 (not deployed). */ indexMissing: boolean }
+
 /**
  * Resolve which browser session to watch. The contract's index is authoritative: if it answers and
  * the agent has no live session we show no-session (and poll). If the index route is missing or
- * unreachable (the deployment case until Tulkas's route lands) we fall back to the Ainur session id
- * the panel already knows, and let a 404 there produce the no-session state per contract §2.
+ * unreachable we fall back to the Ainur session id the panel already knows, and let a 404 there
+ * produce the no-session state per contract §2. `indexMissing` lets the panel say plainly that the
+ * route is not deployed here, instead of implying the agent simply has no browser open.
  */
-async function resolveTarget(base: string, agentId: string, hintSessionId?: string): Promise<Target> {
+async function resolveTarget(base: string, agentId: string, hintSessionId?: string): Promise<Resolution> {
+  const fallback = (indexMissing: boolean): Resolution => ({
+    target: hintSessionId
+      ? { kind: 'stream', id: hintSessionId }
+      : { kind: 'stop', detail: `browser stream route ${base} is unavailable on this server` },
+    indexMissing,
+  })
   try {
     const res = await fetch(base, { headers: { accept: 'application/json' } })
     if (!res.ok) {
-      return hintSessionId
-        ? { kind: 'stream', id: hintSessionId }
-        : { kind: 'stop', detail: `browser session index returned HTTP ${res.status}` }
+      // 404/405: the route is not deployed. Other statuses: present but broken.
+      return fallback(res.status === 404 || res.status === 405)
     }
-    const list = (await res.json()) as unknown
-    if (!Array.isArray(list)) {
-      return hintSessionId ? { kind: 'stream', id: hintSessionId } : { kind: 'stop', detail: 'browser session index returned a non-array body' }
-    }
+    // A deployed server with no such route answers the SPA fallback (`MapFallbackToFile`): 200 plus
+    // index.html. That is not the contract's JSON array, and is the route-missing signature here.
+    let list: unknown
+    try { list = await res.json() } catch { return fallback(true) }
+    if (!Array.isArray(list)) return fallback(true)
     const mine = (list as BrowserSessionInfo[]).filter((s) => s && s.agent_id === agentId && typeof s.id === 'string')
     const pick = mine.find((s) => s.id === hintSessionId) ?? mine[0]
-    if (!pick) return { kind: 'poll', detail: 'no live browser session for this agent' }
-    return { kind: 'stream', id: pick.id }
+    if (!pick) return { target: { kind: 'poll', detail: 'no live browser session for this agent' }, indexMissing: false }
+    return { target: { kind: 'stream', id: pick.id }, indexMissing: false }
   } catch {
-    return hintSessionId
-      ? { kind: 'stream', id: hintSessionId }
-      : { kind: 'stop', detail: 'browser session index unreachable' }
+    return fallback(false)
   }
 }
 
@@ -263,6 +274,7 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
   let pollTimer: number | undefined
   let es: EventSource | undefined
   let lastSeq = -1
+  let indexMissing = false
 
   const stop = () => {
     stopped = true
@@ -315,7 +327,10 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
       }
       h.onEvent('transport-error')
       if (src.readyState === EventSource.CLOSED) {
-        h.onStatus('no-session', `${url} could not be opened (fatal: unknown session, or the stream route is unavailable)`)
+        const detail = indexMissing
+          ? `the browser stream route ${base} is not deployed on this server yet`
+          : `${url} could not be opened (fatal: unknown session, or the stream route is unavailable)`
+        h.onStatus('no-session', detail)
         stop()
         return
       }
@@ -326,7 +341,8 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
   const resolve = async () => {
     if (stopped) return
     h.onStatus('connecting', 'resolving browser session')
-    const target = await resolveTarget(base, agentId, hintSessionId)
+    const { target, indexMissing: missing } = await resolveTarget(base, agentId, hintSessionId)
+    indexMissing = missing
     if (stopped) return
     if (target.kind === 'stop') { h.onStatus('no-session', target.detail); return }
     if (target.kind === 'poll') {
