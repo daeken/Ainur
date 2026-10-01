@@ -72,11 +72,13 @@ public static class Prompts {
 		if(agent.ManagerId is null)
 			sb.Append("- You are the user's only point of contact. Your final plain-text reply (no tool call) is shown to the user, so make it count: outcomes, meaningful changes of direction, blockers, or funding problems, short and concrete. If you are just waiting on your team and the user already knows the plan, end your turn with an empty reply instead of restating it. Do not repeat what you already sent with reply_to_user.\n");
 
-		sb.Append("\n## Team\n").Append(TeamOverview(rt, agent));
+		sb.Append("\n## Team (use the team tool for live states)\n").Append(TeamOverview(rt, agent, includeState: false));
 		sb.Append("\n## Objectives (authoritative current state)\n").Append(ObjectiveOverview(rt, agent));
 
+		// Coarse buckets keep the system prompt stable between turns so provider prefix caching keeps working.
 		var costs = rt.Ledger.Summary(agent.ProjectId);
-		sb.Append($"\n## Budget\nProject effective spend {Money.Format(costs.EffectiveNanos)} of {Money.Format(costs.BudgetNanos)} budget; cash {(costs.CashNanos is { } c ? Money.Format(c) : $"{Money.Format(costs.CashKnownNanos)} + {costs.CashUnknownCount} unknown")}.\n");
+		var used = costs.BudgetNanos > 0 ? (int) (Math.Floor(100.0 * costs.EffectiveNanos / costs.BudgetNanos / 5) * 5) : 0;
+		sb.Append($"\n## Budget\nAbout {used}% of the project's {Money.Format(costs.BudgetNanos)} effective budget is spent. Use the costs tool for exact figures.\n");
 
 		if(host is not null) {
 			var unknown = rt.Store.Db.Read(c => Dapper.SqlMapper.Query<ToolInvocation>(c, "SELECT * FROM tool_invocations WHERE session_id=@SessionId AND state='unknown' ORDER BY created_at DESC LIMIT 5", new { host.SessionId }).ToList());
@@ -90,12 +92,12 @@ public static class Prompts {
 		return sb.ToString();
 	}
 
-	public static string TeamOverview(AinurRuntime rt, Agent self) {
+	public static string TeamOverview(AinurRuntime rt, Agent self, bool includeState = true) {
 		var agents = rt.Store.ListAgents(self.ProjectId).Where(a => AgentStates.IsLive(a.State)).ToList();
 		var children = agents.ToLookup(a => a.ManagerId);
 		var sb = new StringBuilder();
 		void Walk(Agent a, int depth) {
-			sb.Append(new string(' ', depth * 2)).Append($"- {a.Name} ({a.Id}) {a.Role}, {a.Title}, model {a.ModelId}, {a.State}{(a.Id == self.Id ? " ← you" : "")}\n");
+			sb.Append(new string(' ', depth * 2)).Append($"- {a.Name} ({a.Id}) {a.Role}, {a.Title}, model {a.ModelId}{(includeState ? $", {a.State}" : "")}{(a.Id == self.Id ? " ← you" : "")}\n");
 			foreach(var c in children[a.Id]) Walk(c, depth + 1);
 		}
 		foreach(var root in children[null]) Walk(root, 0);
