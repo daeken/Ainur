@@ -31,7 +31,7 @@ public sealed class ToolContext {
 	public required CancellationToken CancellationToken { get; init; }
 	public required Runtime.SessionHost Host { get; init; }
 
-	public string Workspace => Project.WorkspacePath ?? Environment.CurrentDirectory;
+	public string Workspace => Session.WorkspacePath ?? Project.WorkspacePath ?? Environment.CurrentDirectory;
 
 	public string ResolvePath(string path) {
 		if(path.StartsWith("~/")) path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path[2..]);

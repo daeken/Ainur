@@ -45,7 +45,7 @@ public sealed class SessionHost : IDisposable {
 	public Session Session => Runtime.Store.GetSession(SessionId)!;
 	public Agent Agent => Runtime.Store.GetAgent(AgentId)!;
 	public Project Project => Runtime.Store.GetProject(Session.ProjectId)!;
-	public string Workspace => Project.WorkspacePath ?? Environment.CurrentDirectory;
+	public string Workspace => Session.WorkspacePath ?? Project.WorkspacePath ?? Environment.CurrentDirectory;
 	public PowerShellHost PowerShell => Ps ??= new PowerShellHost(this);
 
 	public void Wake() => Dispatcher.Post(() => {

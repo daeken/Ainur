@@ -167,6 +167,19 @@ public sealed partial class AinurRuntime {
 			CompactionMode = original.CompactionMode, ParentSessionId = original.Id, CheckpointSeq = checkpoint, TurnCount = original.TurnCount,
 			NextSeq = 1, TokenRatio = original.TokenRatio, Purpose = purpose, CreatedAt = now, UpdatedAt = now,
 		};
+		// Code work: the fork gets its own worktree from the current snapshot, so the two sessions never share a working directory.
+		var workspace = original.WorkspacePath ?? Store.GetProject(original.ProjectId)!.WorkspacePath;
+		var worktreeNote = "";
+		if(Worktrees.IsRepository(workspace)) {
+			try {
+				var (path, baseCommit) = Worktrees.Materialize(workspace!, Path.Combine(Options.Home, "worktrees"), fork.Id);
+				fork.WorkspacePath = path;
+				fork.WorktreeBase = baseCommit;
+				worktreeNote = $"\nYou are working in an isolated git worktree at {path}, materialized from the original workspace including uncommitted changes. Your file changes there are integrated back into {workspace} when you finish (rejected, not partially applied, if they conflict with newer work).\n";
+			} catch(Exception e) {
+				worktreeNote = $"\n(Could not create an isolated worktree: {TextUtil.Truncate(e.Message, 300)}. You are working directly in the shared workspace; coordinate with request_pause before changing files.)\n";
+			}
+		}
 		Db.Write(u => {
 			Store.InsertSession(u, fork);
 			// Share-nothing copy of the checkpointed transcript; ids are remapped so the fork's view resolves to its own items.
@@ -195,9 +208,10 @@ public sealed partial class AinurRuntime {
 				{question}
 
 				You keep your identity, authority, and tools, and you may make changes and binding decisions. Your original session
-				continues separately; it will receive a concise record of what you decide. When you are done, reply with your final
-				answer as plain text without calling a tool: that text is delivered to the requester.
-				""";
+				continues separately; it will receive a concise record of what you decide. If your change overlaps work your original
+				session is doing, use request_pause first. When you are done, reply with your final answer as plain text without
+				calling a tool: that text is delivered to the requester.
+				""" + worktreeNote;
 			Store.AppendItem(u, fork.Id, ItemKinds.User, new UserPayload { Text = text }, Tokens.Estimate(text));
 			u.Journal("consultation.started", fork.ProjectId, "session", fork.Id, requesterId, new { consulted = consultedId, original = original.Id, checkpoint, question = TextUtil.Truncate(question, 500) });
 		});
@@ -227,6 +241,14 @@ public sealed partial class AinurRuntime {
 		var requester = purpose["requester_agent_id"]!.GetValue<string>();
 		var originalSessionId = purpose["original_session_id"]?.GetValue<string>();
 		var answer = string.IsNullOrWhiteSpace(content) ? "(the consultation ended without a final answer)" : content.Trim();
+		if(session.WorkspacePath is { } worktree && session.WorktreeBase is { } baseCommit) {
+			var target = Store.GetSession(originalSessionId ?? "")?.WorkspacePath ?? Store.GetProject(session.ProjectId)!.WorkspacePath!;
+			var (applied, summary, patch) = Worktrees.Integrate(worktree, baseCommit, target);
+			var patchRef = patch is null ? null : Artifacts.Put(patch);
+			answer += $"\n\n[Integration] {summary}{(patchRef is null || applied ? "" : $"\nPatch artifact: {patchRef}")}";
+			Db.Write(u => u.Journal(applied ? "integration.applied" : "integration.conflict", session.ProjectId, "session", session.Id, agent.Id, new { summary = TextUtil.Truncate(summary, 1000), patch = patchRef }));
+			Worktrees.Remove(worktree);
+		}
 		var changed = Db.Read(c => c.Query<string>(
 			"SELECT DISTINCT tool_name FROM tool_invocations WHERE session_id=@Id AND state='succeeded' AND tool_name IN ('multi_edit','write_file','powershell','update_objective','create_objective','knowledge_write','assign_work','create_agent')",
 			session).AsList());

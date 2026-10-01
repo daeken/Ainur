@@ -355,5 +355,10 @@ public static class Migrations {
 			);
 			CREATE INDEX pause_requests_target ON pause_requests(target_session_id, state);
 			"""),
+		(3, "session_worktrees", """
+			-- Consultation forks of code work run in isolated git worktrees materialized from the original's snapshot.
+			ALTER TABLE sessions ADD COLUMN workspace_path TEXT;
+			ALTER TABLE sessions ADD COLUMN worktree_base TEXT;
+			"""),
 	];
 }

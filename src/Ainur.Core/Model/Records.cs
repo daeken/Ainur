@@ -139,6 +139,9 @@ public sealed class Session {
 	public double TokenRatio { get; set; } = 1.0;
 	public string? Purpose { get; set; }
 	public string? Result { get; set; }
+	/// <summary>Overrides the project workspace (e.g. a fork's isolated worktree).</summary>
+	public string? WorkspacePath { get; set; }
+	public string? WorktreeBase { get; set; }
 	public long CreatedAt { get; set; }
 	public long UpdatedAt { get; set; }
 }

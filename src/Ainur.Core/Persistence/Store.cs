@@ -178,8 +178,8 @@ public sealed class Store(Db db) {
 
 	public void InsertSession(Db.Unit u, Session s) {
 		u.Execute("""
-			INSERT INTO sessions(id,project_id,agent_id,kind,state,model_id,compaction_mode,parent_session_id,checkpoint_seq,turn_count,next_seq,context_revision,token_ratio,purpose,result,created_at,updated_at)
-			VALUES(@Id,@ProjectId,@AgentId,@Kind,@State,@ModelId,@CompactionMode,@ParentSessionId,@CheckpointSeq,@TurnCount,@NextSeq,@ContextRevision,@TokenRatio,@Purpose,@Result,@CreatedAt,@UpdatedAt)
+			INSERT INTO sessions(id,project_id,agent_id,kind,state,model_id,compaction_mode,parent_session_id,checkpoint_seq,turn_count,next_seq,context_revision,token_ratio,purpose,result,workspace_path,worktree_base,created_at,updated_at)
+			VALUES(@Id,@ProjectId,@AgentId,@Kind,@State,@ModelId,@CompactionMode,@ParentSessionId,@CheckpointSeq,@TurnCount,@NextSeq,@ContextRevision,@TokenRatio,@Purpose,@Result,@WorkspacePath,@WorktreeBase,@CreatedAt,@UpdatedAt)
 			""", s);
 		u.Journal("session.created", s.ProjectId, "session", s.Id, s.AgentId, new { s.Kind, s.ParentSessionId, s.Purpose });
 	}
