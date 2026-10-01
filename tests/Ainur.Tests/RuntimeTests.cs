@@ -155,7 +155,7 @@ public class RuntimeTests {
 		var calls = 0;
 		using var rt2 = home.Runtime(new FakeProvider((req, _) => { Interlocked.Increment(ref calls); return FakeProvider.Text("reconciled"); }));
 		Assert.Equal("unknown", rt2.Store.GetInvocation("inv_crash")!.State);
-		var results = rt2.Store.Items(sessionId).Where(i => i.Kind == ItemKinds.ToolResult).Select(i => Ainur.Core.Json.Deserialize<ToolResultPayload>(i.Payload)!).ToList();
+		var results = rt2.Store.Items(sessionId).Where(i => i.Kind == ItemKinds.ToolResult).Select(i => Ainur.Core.JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!).ToList();
 		Assert.Contains(results, r => r.CallId == "c1" && r.Text.StartsWith("OUTCOME UNKNOWN"));
 		Assert.Contains(results, r => r.CallId == "c2" && r.Text.StartsWith("NOT EXECUTED"));
 		// The session resumes and answers; the hung invocation was not retried.

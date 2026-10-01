@@ -161,7 +161,7 @@ public sealed partial class AinurRuntime {
 		var checkpoint = LastCommittedBoundary(items);
 		var view = CurrentView(original.Id);
 		var now = Clock.Now;
-		var purpose = Json.Serialize(new { requester_agent_id = requesterId, question, objective_id = objectiveId, checkpoint_seq = checkpoint, original_session_id = original.Id });
+		var purpose = JsonUtil.Serialize(new { requester_agent_id = requesterId, question, objective_id = objectiveId, checkpoint_seq = checkpoint, original_session_id = original.Id });
 		var fork = new Session {
 			Id = Ids.New("ses"), ProjectId = original.ProjectId, AgentId = consulted.Id, Kind = "consultation", State = "idle", ModelId = original.ModelId,
 			CompactionMode = original.CompactionMode, ParentSessionId = original.Id, CheckpointSeq = checkpoint, TurnCount = original.TurnCount,
@@ -183,7 +183,7 @@ public sealed partial class AinurRuntime {
 				Elided = view.Elided.Select(e => idMap.GetValueOrDefault(e, e)).ToHashSet(),
 				RetainedUntil = view.RetainedUntil.ToDictionary(kv => idMap.GetValueOrDefault(kv.Key, kv.Key), kv => kv.Value),
 			};
-			Store.CommitView(u, fork.Id, Json.Serialize(forkView), $"consultation fork of {original.Id} at #{checkpoint}");
+			Store.CommitView(u, fork.Id, JsonUtil.Serialize(forkView), $"consultation fork of {original.Id} at #{checkpoint}");
 			u.Execute("""
 				INSERT INTO tool_cache(session_id,tool_name,tool_version,pinned,last_used)
 				SELECT @fid, tool_name, tool_version, pinned, last_used FROM tool_cache WHERE session_id=@oid
@@ -212,18 +212,18 @@ public sealed partial class AinurRuntime {
 				// A boundary must not follow an assistant tool call whose results are incomplete.
 				var lastAssistant = ordered.Take(i + 1).LastOrDefault(x => x.Kind == ItemKinds.Assistant);
 				if(lastAssistant is null) return ordered[i].Seq;
-				var calls = Json.Deserialize<AssistantPayload>(lastAssistant.Payload)!.ToolCalls.Select(c => c.Id).ToHashSet();
+				var calls = JsonUtil.Deserialize<AssistantPayload>(lastAssistant.Payload)!.ToolCalls.Select(c => c.Id).ToHashSet();
 				var answered = ordered.Where(x => x.Seq > lastAssistant.Seq && x.Seq <= ordered[i].Seq && x.Kind == ItemKinds.ToolResult)
-					.Select(x => Json.Deserialize<ToolResultPayload>(x.Payload)!.CallId).ToHashSet();
+					.Select(x => JsonUtil.Deserialize<ToolResultPayload>(x.Payload)!.CallId).ToHashSet();
 				if(calls.IsSubsetOf(answered)) return ordered[i].Seq;
-			} else if(Json.Deserialize<AssistantPayload>(ordered[i].Payload)!.ToolCalls.Count == 0)
+			} else if(JsonUtil.Deserialize<AssistantPayload>(ordered[i].Payload)!.ToolCalls.Count == 0)
 				return ordered[i].Seq;
 		}
 		return items.Where(i => i.Kind == ItemKinds.Summary).Select(i => i.Seq).DefaultIfEmpty(0).Max();
 	}
 
 	void FinishConsultation(SessionHost host, Session session, Agent agent, string? content) {
-		var purpose = Json.Parse(session.Purpose)!;
+		var purpose = JsonUtil.Parse(session.Purpose)!;
 		var requester = purpose["requester_agent_id"]!.GetValue<string>();
 		var originalSessionId = purpose["original_session_id"]?.GetValue<string>();
 		var answer = string.IsNullOrWhiteSpace(content) ? "(the consultation ended without a final answer)" : content.Trim();
@@ -258,7 +258,7 @@ public sealed partial class AinurRuntime {
 		var now = Clock.Now;
 		var session = new Session {
 			Id = Ids.New("ses"), ProjectId = requester.ProjectId, AgentId = requester.Id, Kind = "service", State = "idle", ModelId = Options.CheapModelId,
-			CompactionMode = CompactionModes.Full, Purpose = Json.Serialize(new { service, requester_agent_id = requesterId, request, objective_id = objectiveId }),
+			CompactionMode = CompactionModes.Full, Purpose = JsonUtil.Serialize(new { service, requester_agent_id = requesterId, request, objective_id = objectiveId }),
 			CreatedAt = now, UpdatedAt = now,
 		};
 		Db.Write(u => {
@@ -272,7 +272,7 @@ public sealed partial class AinurRuntime {
 	}
 
 	void FinishService(SessionHost host, Session session, string? content) {
-		var purpose = Json.Parse(session.Purpose)!;
+		var purpose = JsonUtil.Parse(session.Purpose)!;
 		var requester = purpose["requester_agent_id"]!.GetValue<string>();
 		var answer = string.IsNullOrWhiteSpace(content) ? "(the service ended without an answer)" : content.Trim();
 		Db.Write(u => {

@@ -28,7 +28,7 @@ public sealed class Watchdog(string path) {
 		lock(WriteGate) {
 			Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
 			var tmp = path + ".tmp";
-			File.WriteAllText(tmp, Json.Serialize(new { pid = Environment.ProcessId, updated_at = Clock.Now, in_flight = InFlight.Values.ToList() }));
+			File.WriteAllText(tmp, JsonUtil.Serialize(new { pid = Environment.ProcessId, updated_at = Clock.Now, in_flight = InFlight.Values.ToList() }));
 			File.Move(tmp, path, overwrite: true);
 		}
 	}

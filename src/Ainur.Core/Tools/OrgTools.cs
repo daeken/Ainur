@@ -17,7 +17,7 @@ static class Org {
 	}
 
 	public static string Evidence(string existing, string? add, string by) {
-		var arr = Json.Parse(existing) as JsonArray ?? [];
+		var arr = JsonUtil.Parse(existing) as JsonArray ?? [];
 		if(!string.IsNullOrWhiteSpace(add))
 			arr.Add(new JsonObject { ["at"] = DateTimeOffset.UtcNow.ToString("u"), ["by"] = by, ["evidence"] = add.Trim() });
 		return arr.ToJsonString();

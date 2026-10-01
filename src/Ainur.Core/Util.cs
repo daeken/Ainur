@@ -16,7 +16,7 @@ public static class Clock {
 	public static long Now => NowMs();
 }
 
-public static class Json {
+public static class JsonUtil {
 	public static readonly JsonSerializerOptions Options = new() {
 		PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
 		DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,

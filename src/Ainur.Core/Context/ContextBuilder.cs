@@ -54,7 +54,7 @@ public static class ContextBuilder {
 		var messages = new List<ChatMessage> { ChatMessage.System(systemPrompt) };
 		var autoElided = new List<string>();
 		if(summary is not null) {
-			var s = Json.Deserialize<SummaryPayload>(summary.Payload)!;
+			var s = JsonUtil.Deserialize<SummaryPayload>(summary.Payload)!;
 			messages.Add(ChatMessage.User(RenderSummary(s)));
 		}
 		// Summary items are rendered only through the view's current summary; superseded ones never reappear.
@@ -65,13 +65,13 @@ public static class ContextBuilder {
 			var item = visible[idx];
 			switch(item.Kind) {
 				case ItemKinds.User:
-					messages.Add(ChatMessage.User(Json.Deserialize<UserPayload>(item.Payload)!.Text));
+					messages.Add(ChatMessage.User(JsonUtil.Deserialize<UserPayload>(item.Payload)!.Text));
 					break;
 				case ItemKinds.Notice:
-					messages.Add(ChatMessage.User("[Runtime notice] " + Json.Deserialize<NoticePayload>(item.Payload)!.Text));
+					messages.Add(ChatMessage.User("[Runtime notice] " + JsonUtil.Deserialize<NoticePayload>(item.Payload)!.Text));
 					break;
 				case ItemKinds.Assistant: {
-					var a = Json.Deserialize<AssistantPayload>(item.Payload)!;
+					var a = JsonUtil.Deserialize<AssistantPayload>(item.Payload)!;
 					// Reasoning is required by thinking models within the active tool loop; older reasoning is not replayed.
 					var reasoning = item.Seq > lastUserSeq ? a.Reasoning : null;
 					// Missing results (e.g. lost in a crash) are synthesized by FillMissingResults to keep the request valid.
@@ -116,9 +116,9 @@ public static class ContextBuilder {
 	static void RenderResultBatch(List<SessionItem> batch, List<ChatMessage> messages, ContextViewState view, int currentTurn, ContextPolicy policy, List<string> autoElided) {
 		var rendered = new List<(string CallId, string Text)>();
 		var budgetPer = batch.Count == 0 ? policy.AggregateResultChars : Math.Max(policy.PreviewChars / 2, policy.AggregateResultChars / batch.Count);
-		var batchFull = batch.Select(i => Json.Deserialize<ToolResultPayload>(i.Payload)!).Sum(p => Math.Min(p.Chars, policy.MaxInlineResultChars)) > policy.AggregateResultChars;
+		var batchFull = batch.Select(i => JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!).Sum(p => Math.Min(p.Chars, policy.MaxInlineResultChars)) > policy.AggregateResultChars;
 		foreach(var item in batch) {
-			var r = Json.Deserialize<ToolResultPayload>(item.Payload)!;
+			var r = JsonUtil.Deserialize<ToolResultPayload>(item.Payload)!;
 			string text;
 			if(IsElided(item, view, currentTurn, policy)) {
 				if(!view.Elided.Contains(item.Id)) autoElided.Add(item.Id);
@@ -165,17 +165,17 @@ public static class ContextBuilder {
 		foreach(var item in items) {
 			sb.Append($"#{item.Seq} ");
 			switch(item.Kind) {
-				case ItemKinds.User: sb.Append("[user/inbox] ").Append(Json.Deserialize<UserPayload>(item.Payload)!.Text); break;
-				case ItemKinds.Notice: sb.Append("[runtime notice] ").Append(Json.Deserialize<NoticePayload>(item.Payload)!.Text); break;
-				case ItemKinds.Summary: sb.Append("[earlier summary] ").Append(Json.Deserialize<SummaryPayload>(item.Payload)!.Text); break;
+				case ItemKinds.User: sb.Append("[user/inbox] ").Append(JsonUtil.Deserialize<UserPayload>(item.Payload)!.Text); break;
+				case ItemKinds.Notice: sb.Append("[runtime notice] ").Append(JsonUtil.Deserialize<NoticePayload>(item.Payload)!.Text); break;
+				case ItemKinds.Summary: sb.Append("[earlier summary] ").Append(JsonUtil.Deserialize<SummaryPayload>(item.Payload)!.Text); break;
 				case ItemKinds.Assistant: {
-					var a = Json.Deserialize<AssistantPayload>(item.Payload)!;
+					var a = JsonUtil.Deserialize<AssistantPayload>(item.Payload)!;
 					sb.Append("[assistant] ").Append(a.Content);
 					foreach(var c in a.ToolCalls) sb.Append($"\n  -> call {c.Name}({TextUtil.Truncate(c.Arguments, 600)}) id={c.Id}");
 					break;
 				}
 				case ItemKinds.ToolResult: {
-					var r = Json.Deserialize<ToolResultPayload>(item.Payload)!;
+					var r = JsonUtil.Deserialize<ToolResultPayload>(item.Payload)!;
 					sb.Append($"[tool result {r.ToolName} invocation={r.InvocationId}{(r.IsError ? " ERROR" : "")}] ").Append(TextUtil.Preview(r.Text, maxResultChars));
 					break;
 				}

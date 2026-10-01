@@ -37,7 +37,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		var record = new ModelRequestRecord {
 			Id = Ids.New("req"), ProjectId = call.ProjectId, SessionId = call.SessionId, AgentId = call.AgentId, ObjectiveId = call.ObjectiveId,
 			Purpose = call.Purpose, ModelId = call.Model.Id, Provider = call.Model.Provider, UpstreamModel = call.Model.UpstreamModel,
-			State = "dispatched", Quote = Json.Serialize(quote), ContextRevision = call.ContextRevision, StartedAt = Clock.Now,
+			State = "dispatched", Quote = JsonUtil.Serialize(quote), ContextRevision = call.ContextRevision, StartedAt = Clock.Now,
 		};
 		var request = new ProviderRequest {
 			Model = call.Model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = call.ReasoningEffort,
@@ -75,7 +75,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		CostEvent? cost = null;
 		store.Db.Write(u => {
 			record.State = "succeeded";
-			record.Usage = Json.Serialize(response.Usage);
+			record.Usage = JsonUtil.Serialize(response.Usage);
 			record.ResponseArtifact = responseArtifact;
 			record.FinishedAt = Clock.Now;
 			u.Execute("UPDATE model_requests SET request_artifact=@requestArtifact WHERE id=@Id", new { requestArtifact, record.Id });

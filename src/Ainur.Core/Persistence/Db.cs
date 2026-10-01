@@ -100,7 +100,7 @@ public sealed class Db {
 
 		/// <summary>Appends to the activity journal inside this transaction.</summary>
 		public void Journal(string kind, string? projectId, string? entityType = null, string? entityId = null, string? agentId = null, object? payload = null) {
-			var json = payload is null ? "{}" : Json.Serialize(payload);
+			var json = payload is null ? "{}" : JsonUtil.Serialize(payload);
 			var now = Clock.Now;
 			var id = Conn.ExecuteScalar<long>(
 				"INSERT INTO events(project_id, kind, entity_type, entity_id, agent_id, payload, created_at) VALUES(@projectId, @kind, @entityType, @entityId, @agentId, @json, @now) RETURNING id",

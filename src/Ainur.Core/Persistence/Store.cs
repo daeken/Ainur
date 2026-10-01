@@ -196,7 +196,7 @@ public sealed class Store(Db db) {
 		var s = GetSession(u, sessionId) ?? throw new DomainException($"Unknown session {sessionId}");
 		var item = new SessionItem {
 			Id = Ids.New("itm"), SessionId = sessionId, Seq = s.NextSeq, Kind = kind, Turn = s.TurnCount,
-			Payload = payload as string ?? Json.Serialize(payload), TokenEstimate = tokenEstimate, CreatedAt = Clock.Now,
+			Payload = payload as string ?? JsonUtil.Serialize(payload), TokenEstimate = tokenEstimate, CreatedAt = Clock.Now,
 		};
 		u.Execute("INSERT INTO session_items(id,session_id,seq,kind,turn,payload,token_estimate,created_at) VALUES(@Id,@SessionId,@Seq,@Kind,@Turn,@Payload,@TokenEstimate,@CreatedAt)", item);
 		u.Execute("UPDATE sessions SET next_seq=next_seq+1, updated_at=@now WHERE id=@sessionId", new { sessionId, now = Clock.Now });

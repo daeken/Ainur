@@ -193,7 +193,7 @@ public sealed class ElideResultsTool : BuiltinTool {
 		var view = ctx.Runtime.CurrentView(ctx.Session.Id);
 		var elided = new List<string>();
 		foreach(var item in items) {
-			var p = Json.Deserialize<ToolResultPayload>(item.Payload)!;
+			var p = JsonUtil.Deserialize<ToolResultPayload>(item.Payload)!;
 			if(all || ids.Contains(p.InvocationId)) {
 				view.Elided.Add(item.Id);
 				view.RetainedUntil.Remove(item.Id);
@@ -220,7 +220,7 @@ public sealed class RetainResultTool : BuiltinTool {
 		var view = ctx.Runtime.CurrentView(ctx.Session.Id);
 		var n = 0;
 		foreach(var item in ctx.Runtime.Store.Items(ctx.Session.Id).Where(i => i.Kind == ItemKinds.ToolResult))
-			if(ids.Contains(Json.Deserialize<ToolResultPayload>(item.Payload)!.InvocationId)) {
+			if(ids.Contains(JsonUtil.Deserialize<ToolResultPayload>(item.Payload)!.InvocationId)) {
 				view.RetainedUntil[item.Id] = until;
 				view.Elided.Remove(item.Id);
 				n++;
@@ -288,7 +288,7 @@ public sealed class RegisterToolTool : BuiltinTool {
 		var parse = System.Management.Automation.Language.Parser.ParseInput(tool.Script, out _, out var errors);
 		if(errors.Length > 0) throw new ToolException("Script does not parse:\n" + string.Join("\n", errors.Select(e => $"line {e.Extent.StartLineNumber}: {e.Message}")));
 		var previous = ctx.Runtime.Tools.Get(name);
-		ctx.Runtime.Tools.Register(tool, ctx.Project.Id, "powershell", Json.Serialize(tool.Definition), ctx.Agent.Id);
+		ctx.Runtime.Tools.Register(tool, ctx.Project.Id, "powershell", JsonUtil.Serialize(tool.Definition), ctx.Agent.Id);
 		var sb = new StringBuilder($"Registered {tool.Version}{(previous is null ? "" : $" (previous version {previous.Version} remains available to sessions that pinned it)")}.");
 		ctx.Host.Cache.Load([name], ctx.Runtime.PolicyFor(ctx.Agent, ctx.Session).ToolTokenBudget);
 		if(OptStr(args, "test_arguments") is { } test) {

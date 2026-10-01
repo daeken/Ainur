@@ -114,7 +114,7 @@ public sealed partial class AinurRuntime : IDisposable {
 			// Give the model a result for the dangling call so its exchange stays valid, stating the uncertainty.
 			var session = Store.GetSession(inv.SessionId);
 			if(session is null) continue;
-			var hasResult = Store.Items(inv.SessionId).Any(i => i.Kind == ItemKinds.ToolResult && Json.Deserialize<ToolResultPayload>(i.Payload)!.CallId == inv.CallId);
+			var hasResult = Store.Items(inv.SessionId).Any(i => i.Kind == ItemKinds.ToolResult && JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!.CallId == inv.CallId);
 			if(hasResult) continue;
 			var text = $"OUTCOME UNKNOWN: the runtime restarted while {inv.ToolName} was running (invocation {inv.Id}). " +
 				(culprit ? "The supervisor terminated the runtime because this invocation exceeded its deadline. Do not simply retry it; find a bounded approach. " : "") +
@@ -134,7 +134,7 @@ public sealed partial class AinurRuntime : IDisposable {
 				req.Error = "Runtime stopped while the request was in flight; usage is estimated pending reconciliation.";
 				req.FinishedAt = Clock.Now;
 				Store.UpdateModelRequest(u, req);
-				var quote = Json.Deserialize<Quote>(req.Quote)!;
+				var quote = JsonUtil.Deserialize<Quote>(req.Quote)!;
 				var charge = Pricing.Settle(quote, new Usage { InputTokens = quote.EstimatedInputTokens, Reported = false });
 				Ledger.Settle(u, req, charge with { CashBasis = charge.CashNanos is null ? "unknown" : "estimated" }, req.Purpose == "turn" ? "direct" : req.Purpose, null);
 				u.Journal("model.reconciled", req.ProjectId, "model_request", req.Id, req.AgentId, new { state = "unknown" });
@@ -148,8 +148,8 @@ public sealed partial class AinurRuntime : IDisposable {
 		var items = Store.Items(sessionId);
 		var lastAssistant = items.LastOrDefault(i => i.Kind == ItemKinds.Assistant);
 		if(lastAssistant is null) return;
-		var a = Json.Deserialize<AssistantPayload>(lastAssistant.Payload)!;
-		var answered = items.Where(i => i.Seq > lastAssistant.Seq && i.Kind == ItemKinds.ToolResult).Select(i => Json.Deserialize<ToolResultPayload>(i.Payload)!.CallId).ToHashSet();
+		var a = JsonUtil.Deserialize<AssistantPayload>(lastAssistant.Payload)!;
+		var answered = items.Where(i => i.Seq > lastAssistant.Seq && i.Kind == ItemKinds.ToolResult).Select(i => JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!.CallId).ToHashSet();
 		foreach(var call in a.ToolCalls.Where(c => !answered.Contains(c.Id))) {
 			var text = $"NOT EXECUTED: the runtime restarted before {call.Name} ran. It had no effect; call it again if still needed.";
 			Db.Write(u => Store.AppendItem(u, sessionId, ItemKinds.ToolResult, new ToolResultPayload {
@@ -161,7 +161,7 @@ public sealed partial class AinurRuntime : IDisposable {
 	public string RestartReasonPath => Path.Combine(Options.Home, "runtime", "restart-reason.json");
 	public sealed record RestartReason(string? InvocationId, string Reason, long At);
 	RestartReason? ReadRestartReason() {
-		try { return File.Exists(RestartReasonPath) ? Json.Deserialize<RestartReason>(File.ReadAllText(RestartReasonPath)) : null; } catch { return null; }
+		try { return File.Exists(RestartReasonPath) ? JsonUtil.Deserialize<RestartReason>(File.ReadAllText(RestartReasonPath)) : null; } catch { return null; }
 	}
 
 	/// <summary>Stops dispatching new steps and waits for sessions to reach safe boundaries.</summary>
@@ -228,7 +228,7 @@ public sealed partial class AinurRuntime : IDisposable {
 		Options.PolicyOverride?.Invoke(agent, session) ?? (agent.Lifetime == Lifetimes.Ephemeral ? Options.EphemeralPolicy : Options.PersistentPolicy);
 
 	public ContextViewState CurrentView(string sessionId) =>
-		Store.CurrentView(sessionId) is { } v ? Json.Deserialize<ContextViewState>(v.State)! : new ContextViewState();
+		Store.CurrentView(sessionId) is { } v ? JsonUtil.Deserialize<ContextViewState>(v.State)! : new ContextViewState();
 
 	public BuiltContext BuildContext(SessionHost host, ContextPolicy policy) {
 		var session = host.Session;
@@ -240,7 +240,7 @@ public sealed partial class AinurRuntime : IDisposable {
 	}
 
 	public void CommitView(string sessionId, ContextViewState view, string reason) =>
-		Db.Write(u => Store.CommitView(u, sessionId, Json.Serialize(view), reason));
+		Db.Write(u => Store.CommitView(u, sessionId, JsonUtil.Serialize(view), reason));
 
 	public void InitializeToolCache(SessionHost host, Agent agent, ContextPolicy policy) {
 		var names = Tools.DefaultsFor(agent);
@@ -264,7 +264,7 @@ public sealed partial class AinurRuntime : IDisposable {
 		"SELECT id FROM objectives WHERE owner_id=@agentId AND state IN ('active','verifying','ready','blocked') ORDER BY updated_at DESC LIMIT 1", new { agentId }));
 
 	public string? SponsorFor(Session session) =>
-		session.Kind is "consultation" or "service" && Json.Parse(session.Purpose)?["requester_agent_id"]?.GetValue<string>() is { } r ? r : null;
+		session.Kind is "consultation" or "service" && JsonUtil.Parse(session.Purpose)?["requester_agent_id"]?.GetValue<string>() is { } r ? r : null;
 
 	// ---- Turn completion and failure handling ----
 

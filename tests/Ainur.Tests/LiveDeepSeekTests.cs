@@ -31,7 +31,7 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 		var tool = new ToolSpec("get_weather", "Get the weather for a city.", Schema.Object(("city", Schema.String("City"), true)));
 		var messages = new List<ChatMessage> { ChatMessage.System("Use tools when helpful."), ChatMessage.User("What's the weather in Lisbon? Use the tool.") };
 		var r1 = await provider.CompleteAsync(new ProviderRequest { Model = Flash, Messages = messages, Tools = [tool], MaxOutputTokens = 2000, ReasoningEffort = "low" }, null, default);
-		output.WriteLine($"r1 finish={r1.FinishReason} calls={r1.ToolCalls.Count} reasoning={r1.Reasoning?.Length} usage={Ainur.Core.Json.Serialize(r1.Usage)}");
+		output.WriteLine($"r1 finish={r1.FinishReason} calls={r1.ToolCalls.Count} reasoning={r1.Reasoning?.Length} usage={Ainur.Core.JsonUtil.Serialize(r1.Usage)}");
 		Assert.NotEmpty(r1.ToolCalls);
 		Assert.Equal("get_weather", r1.ToolCalls[0].Name);
 		Assert.True(r1.Usage.InputTokens > 0);

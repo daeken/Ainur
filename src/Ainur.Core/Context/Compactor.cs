@@ -33,7 +33,7 @@ public sealed class Compactor(Store store, ModelGateway gateway) {
 		var visible = items.Where(i => i.Seq > view.CutoffSeq && i.Kind != ItemKinds.Summary).OrderBy(i => i.Seq).ToList();
 		if(visible.Count == 0) throw new InvalidOperationException("Nothing to compact");
 		var previous = view.SummaryItemId is null ? null : items.FirstOrDefault(i => i.Id == view.SummaryItemId);
-		var previousSummary = previous is null ? null : Json.Deserialize<SummaryPayload>(previous.Payload);
+		var previousSummary = previous is null ? null : JsonUtil.Deserialize<SummaryPayload>(previous.Payload);
 
 		int cut; // index of the last item to fold into the summary
 		if(mode == CompactionModes.Full)
@@ -66,7 +66,7 @@ public sealed class Compactor(Store store, ModelGateway gateway) {
 			u.Execute("""
 				INSERT INTO compactions(id,session_id,mode,from_seq,through_seq,source_tokens,state,policy,created_at)
 				VALUES(@compactionId,@sid,@mode,@from,@through,@sourceTokens,'running',@policy,@now)
-				""", new { compactionId, sid = session.Id, mode, from, through, sourceTokens, policy = Json.Serialize(policy), now = Clock.Now });
+				""", new { compactionId, sid = session.Id, mode, from, through, sourceTokens, policy = JsonUtil.Serialize(policy), now = Clock.Now });
 			u.Journal("compaction.started", session.ProjectId, "session", session.Id, agent.Id, new { compactionId, mode, from, through, sourceTokens });
 		});
 
@@ -83,7 +83,7 @@ public sealed class Compactor(Store store, ModelGateway gateway) {
 			store.Db.Write(u => {
 				var item = store.AppendItem(u, session.Id, ItemKinds.Summary, payload, summaryTokens);
 				newView.SummaryItemId = item.Id;
-				store.CommitView(u, session.Id, Json.Serialize(newView), $"{mode} compaction {compactionId}");
+				store.CommitView(u, session.Id, JsonUtil.Serialize(newView), $"{mode} compaction {compactionId}");
 				u.Execute("UPDATE compactions SET state='succeeded', summary_item_id=@id, summary_tokens=@summaryTokens, finished_at=@now WHERE id=@compactionId",
 					new { id = item.Id, summaryTokens, now = Clock.Now, compactionId });
 				u.Journal("compaction.succeeded", session.ProjectId, "session", session.Id, agent.Id, new { compactionId, mode, from, through, sourceTokens, summaryTokens });
