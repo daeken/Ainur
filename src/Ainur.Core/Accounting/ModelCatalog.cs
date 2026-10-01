@@ -6,11 +6,12 @@ namespace Ainur.Core.Accounting;
 /// <summary>Initial model inventory seeded from docs/model-catalog.md (FlatlineProxy configuration, October 1, 2026).</summary>
 public static class ModelCatalog {
 	const string Flatline = "FlatlineProxy local config 2026-10-01 (unverified estimate)";
+	const string Assumed = "assumed conservative reference schedule (no validated API price)";
 
-	static ModelInfo M(string id, string provider, string upstream, string name, int? ctx, string? input, string? cached, string? output, string billing, bool enabled, string notes = "", int? maxOut = null) => new() {
+	static ModelInfo M(string id, string provider, string upstream, string name, int? ctx, string? input, string? cached, string? output, string billing, bool enabled, string notes = "", int? maxOut = null, string premium = "1", string? provenance = null) => new() {
 		Id = id, Provider = provider, UpstreamModel = upstream, DisplayName = name, ContextTokens = ctx, MaxOutputTokens = maxOut,
 		InputPerMillion = input, CachedInputPerMillion = cached, OutputPerMillion = output,
-		PriceProvenance = input is null ? "none" : Flatline, Billing = billing, Premium = "1", Enabled = enabled, Notes = notes,
+		PriceProvenance = provenance ?? (input is null ? "none" : Flatline), Billing = billing, Premium = premium, Enabled = enabled, Notes = notes,
 	};
 
 	public static readonly IReadOnlyList<ModelInfo> Seed = [
@@ -28,9 +29,11 @@ public static class ModelCatalog {
 		M("claude-sonnet-5", "anthropic", "claude-sonnet-5", "Claude Sonnet 5", 1_000_000, "3.00", null, "15.00", "subscription", false, "Adapter not implemented yet."),
 		M("claude-haiku-4-5", "anthropic", "claude-haiku-4-5", "Claude Haiku 4.5", 200_000, "1.00", null, "5.00", "subscription", false, "Adapter not implemented yet."),
 		M("grok-4.5", "xai", "grok-4.5", "Grok 4.5", 500_000, null, null, null, "api", false, "Adapter not implemented yet."),
-		M("glm-5.1", "zai", "glm-5.1", "GLM 5.1", 204_800, null, null, null, "api", false, "Adapter not implemented yet."),
-		M("glm-5.2", "zai", "glm-5.2", "GLM 5.2", 1_048_576, null, null, null, "api", false, "Adapter not implemented yet."),
-		M("glm-5.3", "zai", "glm-5.3", "GLM 5.3", 1_048_576, null, null, null, "api", false, "Adapter not implemented yet."),
+		// GLM through the GLM Coding Plan subscription endpoint. No validated API price exists, so these are an explicitly
+		// configured conservative reference schedule for effective-dollar valuation, with a subscription premium.
+		M("glm-5.1", "zai", "glm-5.1", "GLM 5.1", 204_800, "1.50", "0.30", "6.00", "subscription", true, "Coding Plan subscription; reference prices are assumed, unverified.", 131_072, premium: "1.25", provenance: Assumed),
+		M("glm-5.2", "zai", "glm-5.2", "GLM 5.2", 1_048_576, "1.50", "0.30", "6.00", "subscription", true, "Coding Plan subscription; reference prices are assumed, unverified.", 131_072, premium: "1.25", provenance: Assumed),
+		M("glm-5.3", "zai", "glm-5.3", "GLM 5.3", 1_048_576, "1.50", "0.30", "6.00", "subscription", true, "Coding Plan subscription; live-verified 2026-10-01. Reference prices are assumed, unverified.", 131_072, premium: "1.25", provenance: Assumed),
 	];
 
 	public static void EnsureSeeded(Store store) => store.Db.Write(u => {

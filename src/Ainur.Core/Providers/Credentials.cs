@@ -15,7 +15,7 @@ public static class Credentials {
 		["openai"] = new("OPENAI_API_KEY", null, null),
 		["anthropic"] = new("ANTHROPIC_API_KEY", null, null),
 		["xai"] = new("XAI_API_KEY", null, null),
-		["zai"] = new("ZAI_API_KEY", null, null),
+		["zai"] = new("ZAI_API_KEY", "ai.z.api", "FlatlineProxy"),
 	};
 
 	public static string? FlatlineConfigPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "projects", "FlatlineProxy", "flatline.json");

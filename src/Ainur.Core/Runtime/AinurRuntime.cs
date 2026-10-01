@@ -69,6 +69,7 @@ public sealed partial class AinurRuntime : IDisposable {
 	public static ProviderRegistry DefaultProviders() {
 		var registry = new ProviderRegistry();
 		registry.Register(DeepSeekProvider.CreateDefault());
+		registry.Register(ZaiProvider.CreateDefault());
 		return registry;
 	}
 

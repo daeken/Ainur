@@ -6,23 +6,11 @@ using System.Text.Json.Nodes;
 namespace Ainur.Core.Providers;
 
 /// <summary>
-/// DeepSeek Chat Completions adapter with streaming. DeepSeek thinking models return <c>reasoning_content</c>,
-/// which must be sent back on assistant turns that issued tool calls, so it is preserved verbatim.
+/// OpenAI-compatible Chat Completions adapter with streaming, used for DeepSeek and Z.ai. Thinking models return
+/// <c>reasoning_content</c>, which must be sent back on assistant turns that issued tool calls, so it is preserved verbatim.
 /// </summary>
-public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, string baseUrl = "https://api.deepseek.com") : IModelProvider {
-	public string Id => "deepseek";
-
-	public static DeepSeekProvider CreateDefault() =>
-		new(new HttpClient { Timeout = TimeSpan.FromMinutes(30) }, () => Credentials.Resolve("deepseek"));
-
-	public static string MapEffort(string? effort) => effort switch {
-		null => "high",
-		"none" => "none",
-		"minimal" or "low" => "low",
-		"medium" or "high" or "xhigh" => "high",
-		"max" or "ultra" => "max",
-		_ => "high",
-	};
+public sealed class ChatCompletionsProvider(string id, HttpClient http, Func<string?> apiKey, string endpoint, Func<string?, string> mapEffort, bool sendEffortLevel = true) : IModelProvider {
+	public string Id => id;
 
 	public JsonObject BuildRequest(ProviderRequest request) {
 		var messages = new JsonArray();
@@ -55,12 +43,12 @@ public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, stri
 			["stream_options"] = new JsonObject { ["include_usage"] = true },
 			["max_tokens"] = request.MaxOutputTokens,
 		};
-		var effort = MapEffort(request.ReasoningEffort);
+		var effort = mapEffort(request.ReasoningEffort);
 		if(effort == "none")
 			body["thinking"] = new JsonObject { ["type"] = "disabled" };
 		else {
 			body["thinking"] = new JsonObject { ["type"] = "enabled" };
-			body["reasoning_effort"] = effort;
+			if(sendEffortLevel) body["reasoning_effort"] = effort;
 		}
 		if(request.Tools.Count > 0) {
 			body["tools"] = new JsonArray(request.Tools.Select(t => (JsonNode) new JsonObject {
@@ -73,10 +61,10 @@ public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, stri
 	}
 
 	public async Task<ProviderResponse> CompleteAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
-		var key = apiKey() ?? throw new ProviderException("No DeepSeek API key found (DEEPSEEK_API_KEY or keychain ai.deepseek.api).");
+		var key = apiKey() ?? throw new ProviderException($"No API key found for provider {id}.");
 		var body = BuildRequest(request);
 		var rawRequest = body.ToJsonString();
-		using var msg = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl.TrimEnd('/')}/chat/completions") {
+		using var msg = new HttpRequestMessage(HttpMethod.Post, endpoint) {
 			Content = new StringContent(rawRequest, Encoding.UTF8, "application/json"),
 		};
 		msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
@@ -86,13 +74,13 @@ public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, stri
 		try {
 			resp = await http.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead, ct);
 		} catch(HttpRequestException e) {
-			throw new ProviderException($"DeepSeek transport error: {e.Message}", retryable: true);
+			throw new ProviderException($"{id} transport error: {e.Message}", retryable: true);
 		}
 		using var _ = resp;
 		if(!resp.IsSuccessStatusCode) {
 			var error = await resp.Content.ReadAsStringAsync(ct);
 			var status = (int) resp.StatusCode;
-			throw new ProviderException($"DeepSeek HTTP {status}: {TextUtil.Truncate(error, 2000)}", status, retryable: status is 429 or >= 500);
+			throw new ProviderException($"{id} HTTP {status}: {TextUtil.Truncate(error, 2000)}", status, retryable: status is 429 or >= 500);
 		}
 
 		var result = new ProviderResponse { RawRequest = rawRequest };
@@ -142,7 +130,7 @@ public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, stri
 					}
 			}
 		} catch(Exception e) when(e is IOException or HttpRequestException or JsonException) {
-			throw new ProviderException($"DeepSeek stream interrupted: {e.Message}", retryable: true, mayHaveBilled: true);
+			throw new ProviderException($"{id} stream interrupted: {e.Message}", retryable: true, mayHaveBilled: true);
 		}
 
 		result.Content = content.Length > 0 ? content.ToString() : null;
@@ -151,7 +139,7 @@ public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, stri
 		result.RawResponse = raw.ToString();
 		if(!sawUsage) result.Usage = new Usage { Reported = false };
 		if(result.FinishReason is null)
-			throw new ProviderException("DeepSeek stream ended without a finish reason", retryable: true, mayHaveBilled: true);
+			throw new ProviderException($"{id} stream ended without a finish reason", retryable: true, mayHaveBilled: true);
 		return result;
 	}
 
@@ -168,4 +156,29 @@ public sealed class DeepSeekProvider(HttpClient http, Func<string?> apiKey, stri
 			usage.ReasoningTokens = Get(ctd, "reasoning_tokens");
 		return usage;
 	}
+}
+
+public static class DeepSeekProvider {
+	public static string MapEffort(string? effort) => effort switch {
+		null => "high",
+		"none" => "none",
+		"minimal" or "low" => "low",
+		"medium" or "high" or "xhigh" => "high",
+		"max" or "ultra" => "max",
+		_ => "high",
+	};
+
+	public static ChatCompletionsProvider CreateDefault() =>
+		new("deepseek", new HttpClient { Timeout = TimeSpan.FromMinutes(30) }, () => Credentials.Resolve("deepseek"), "https://api.deepseek.com/chat/completions", MapEffort);
+}
+
+/// <summary>Z.ai GLM models through the GLM Coding Plan (subscription) endpoint.</summary>
+public static class ZaiProvider {
+	public static string MapEffort(string? effort) => effort switch {
+		"none" => "none",
+		_ => "enabled",
+	};
+
+	public static ChatCompletionsProvider CreateDefault() =>
+		new("zai", new HttpClient { Timeout = TimeSpan.FromMinutes(30) }, () => Credentials.Resolve("zai"), "https://api.z.ai/api/coding/paas/v4/chat/completions", MapEffort, sendEffortLevel: false);
 }
