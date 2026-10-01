@@ -102,7 +102,7 @@ public sealed class CreateAgentTool : BuiltinTool {
 		("instructions", Schema.String("Standing instructions and context for the agent."), true),
 		("lifetime", Schema.String("persistent (default) or ephemeral.", Lifetimes.Persistent, Lifetimes.Ephemeral), false),
 		("model", Schema.String("Model id (see costs tool for available models). Defaults by role."), false),
-		("reasoning_effort", Schema.String("none, low, high, or max.", "none", "low", "high", "max"), false),
+		("reasoning_effort", Schema.String("medium, high, or max. Defaults to high; nothing below medium is accepted.", "medium", "high", "max"), false),
 		("reports_to", Schema.String("Manager agent id or name (default: you)."), false),
 		("termination_condition", Schema.String("Ephemeral agents: when the assignment is finished."), false),
 		("compaction_mode", Schema.String("rolling or full (defaults: rolling for persistent, full for ephemeral).", "rolling", "full"), false));
@@ -218,16 +218,17 @@ public sealed class SetAgentModelTool : BuiltinTool {
 	public override string Name => "set_agent_model";
 	public override string Description => """
 		Managers: change the model and/or the reasoning effort of an agent in your subtree, or of yourself (agent: "me").
-		The model must exist in the catalog, be enabled, and have a live provider adapter; the effort must be one of none,
-		low, high, max and be supported by the chosen model's provider. The change is journaled as agent.updated and takes
-		effect at the target's next model step (its running primary session is retargeted) — no new session or runtime
-		restart is required. Omitted fields are left unchanged.
+		The model must exist in the catalog, be enabled, and have a live provider adapter. The effort must be one of
+		medium, high, max — medium is the platform floor and lower values are rejected, never silently raised — and
+		must be supported by the chosen model's provider. The change is journaled as agent.updated and takes effect at
+		the target's next model step (its running primary session is retargeted) — no new session or runtime restart is
+		required. Omitted fields are left unchanged; an unspecified effort already defaults to high at creation.
 		""";
 	public override IReadOnlyList<string> Tags => ["agent", "model", "reasoning", "effort", "manager", "assign"];
 	public override JsonObject InputSchema => Schema.Object(
 		("agent", Schema.String("Agent id or name to change, or \"me\" for yourself."), true),
 		("model", Schema.String("New model id (see the costs tool for available models)."), false),
-		("reasoning_effort", Schema.String("none, low, high, or max.", "none", "low", "high", "max"), false));
+		("reasoning_effort", Schema.String("medium, high, or max. Nothing below medium is accepted.", "medium", "high", "max"), false));
 
 	public override Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args) {
 		var target = Str(args, "agent");

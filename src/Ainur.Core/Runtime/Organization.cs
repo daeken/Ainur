@@ -53,8 +53,26 @@ public sealed partial class AinurRuntime {
 		return agent;
 	}
 
-	/// <summary>Reasoning-effort values the platform accepts, matching the create_agent tool schema (Tools/OrgTools.cs:105).</summary>
-	public static readonly string[] AllowedReasoningEfforts = ["none", "low", "high", "max"];
+	/// <summary>
+	/// Reasoning-effort values the platform accepts. Policy 2026-10-01: 'high' is the default and 'medium' is the
+	/// enforced floor — nothing below medium may be requested at any authoritative agent control (create_agent,
+	/// set_agent_model, PATCH /agents/{id}). Mirrors the tool schemas at Tools/OrgTools.cs.
+	/// </summary>
+	public static readonly string[] AllowedReasoningEfforts = ["medium", "high", "max"];
+
+	/// <summary>The reasoning effort used when an agent is created without an explicit choice.</summary>
+	public const string DefaultReasoningEffort = "high";
+
+	/// <summary>Normalizes and validates an explicitly supplied effort; throws rather than silently clamping.</summary>
+	public static string ValidateReasoningEffort(string value) {
+		var effort = value.Trim().ToLowerInvariant();
+		if(!AllowedReasoningEfforts.Contains(effort))
+			throw new DomainException($"Reasoning effort '{value}' is not allowed: 'medium' is the platform floor and lower values ('none', 'minimal', 'low') may not be requested. Allowed: {string.Join(", ", AllowedReasoningEfforts)}");
+		return effort;
+	}
+
+	/// <summary>Resolves a possibly-unspecified effort: unspecified means the platform default ('high').</summary>
+	public static string ResolveReasoningEffort(string? value) => value is null ? DefaultReasoningEffort : ValidateReasoningEffort(value);
 
 	/// <summary>
 	/// The efforts each provider adapter can actually transmit, derived from the adapters themselves
@@ -65,9 +83,14 @@ public sealed partial class AinurRuntime {
 	/// assumed to accept the platform vocabulary.
 	/// </summary>
 	static readonly Dictionary<string, string[]> ProviderEfforts = new(StringComparer.OrdinalIgnoreCase) {
-		["deepseek"] = ["none", "low", "high", "max"],
-		["openai"] = ["none", "low", "medium", "high", "xhigh", "max", "ultra"],
-		["zai"] = ["none"],
+		// deepseek transmits an effort level. DeepSeekProvider.MapEffort collapses 'medium' onto its 'high' wire
+		// value — an upgrade, never a downgrade below the floor; making medium distinct is a provider change (Aulë).
+		["deepseek"] = ["medium", "high", "max"],
+		// openai passes the value through untouched.
+		["openai"] = ["medium", "high", "max"],
+		// zai is constructed with sendEffortLevel: false, so it only toggles thinking on/off and cannot express a
+		// level at all; every permitted effort maps to thinking-enabled. Disclosed limitation, not a sub-medium downshift.
+		["zai"] = ["medium", "high", "max"],
 	};
 
 	public sealed record AgentModelChange {
@@ -104,16 +127,12 @@ public sealed partial class AinurRuntime {
 				throw new DomainException($"Model '{modelId}' is not usable yet (disabled, or provider '{model.Provider}' has no live adapter). Usable models: {string.Join(", ", Store.ListModels().Where(m => m.Enabled && Providers.Has(m.Provider)).Select(m => m.Id))}");
 			desiredModel = model.Id;
 		}
-		var desiredEffort = agent.ReasoningEffort;
-		if(reasoningEffort is not null) {
-			var effort = reasoningEffort.Trim().ToLowerInvariant();
-			if(!AllowedReasoningEfforts.Contains(effort))
-				throw new DomainException($"Unknown reasoning effort '{reasoningEffort}'. Allowed: {string.Join(", ", AllowedReasoningEfforts)}");
-			var chosen = Store.GetModel(desiredModel) ?? throw new DomainException($"Agent {agent.Name} is on unknown model '{desiredModel}'; set a valid model first");
-			if(ProviderEfforts.TryGetValue(chosen.Provider, out var supported) && !supported.Contains(effort))
-				throw new DomainException($"Model '{chosen.Id}' (provider '{chosen.Provider}') does not support reasoning effort '{effort}'. Supported: {string.Join(", ", supported)}");
-			desiredEffort = effort;
-		}
+		// Model-only changes may not carry a legacy sub-floor effort into a fresh provider dispatch. A caller may
+		// repair such an agent by supplying medium/high/max in the same change; a legacy null defaults to high.
+		var desiredEffort = reasoningEffort is null ? ResolveReasoningEffort(agent.ReasoningEffort) : ValidateReasoningEffort(reasoningEffort);
+		var chosen = Store.GetModel(desiredModel) ?? throw new DomainException($"Agent {agent.Name} is on unknown model '{desiredModel}'; set a valid model first");
+		if(ProviderEfforts.TryGetValue(chosen.Provider, out var supported) && !supported.Contains(desiredEffort))
+			throw new DomainException($"Model '{chosen.Id}' (provider '{chosen.Provider}') does not support reasoning effort '{desiredEffort}'. Supported: {string.Join(", ", supported)}");
 		var previousModel = agent.ModelId;
 		var previousEffort = agent.ReasoningEffort;
 		var retargeted = new List<string>();
@@ -144,6 +163,10 @@ public sealed partial class AinurRuntime {
 		var model = u.Single<ModelInfo>("SELECT * FROM models WHERE id=@modelId", new { modelId }) ?? throw new DomainException($"Unknown model '{modelId}'");
 		if(!model.Enabled || !Providers.Has(model.Provider))
 			throw new DomainException($"Model '{modelId}' is not usable yet (provider '{model.Provider}' has no live adapter). Usable models: {string.Join(", ", Store.ListModels().Where(m => m.Enabled && Providers.Has(m.Provider)).Select(m => m.Id))}");
+		// Policy 2026-10-01: unspecified means 'high'; anything below the 'medium' floor is rejected here, before insert.
+		var effort = ResolveReasoningEffort(spec.ReasoningEffort);
+		if(ProviderEfforts.TryGetValue(model.Provider, out var supported) && !supported.Contains(effort))
+			throw new DomainException($"Model '{model.Id}' (provider '{model.Provider}') does not support reasoning effort '{effort}'. Supported: {string.Join(", ", supported)}");
 		if(spec.Role is not (Roles.Manager or Roles.Specialist)) throw new DomainException($"Unknown role '{spec.Role}'");
 		if(spec.Lifetime is not (Lifetimes.Persistent or Lifetimes.Ephemeral)) throw new DomainException($"Unknown lifetime '{spec.Lifetime}'");
 		var name = spec.Name.Trim();
@@ -152,7 +175,7 @@ public sealed partial class AinurRuntime {
 			throw new DomainException($"An active agent named {name} already exists in this project");
 		var agent = new Agent {
 			Id = Ids.New("agt"), ProjectId = projectId, Name = name, Title = spec.Title, Role = spec.Role, Lifetime = spec.Lifetime, ManagerId = spec.ManagerId,
-			ModelId = modelId, ReasoningEffort = spec.ReasoningEffort, State = AgentStates.Sleeping,
+			ModelId = modelId, ReasoningEffort = effort, State = AgentStates.Sleeping,
 			CompactionMode = spec.CompactionMode ?? (spec.Lifetime == Lifetimes.Persistent ? CompactionModes.Rolling : CompactionModes.Full),
 			Instructions = spec.Instructions, TerminationCondition = spec.TerminationCondition, CreatedBy = actorId, CreatedAt = now, UpdatedAt = now,
 		};
