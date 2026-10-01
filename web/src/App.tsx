@@ -135,8 +135,12 @@ function BudgetCard({ project, onChanged }: { project: Project; onChanged: () =>
 
 function RuntimeControls() {
   const [health, setHealth] = useState<any>()
+  const [version, setVersion] = useState<any>()
   useEffect(() => {
-    const load = () => fetch('/api/v1/health').then((r) => r.json()).then(setHealth).catch(() => setHealth(undefined))
+    const load = () => {
+      fetch('/api/v1/health').then((r) => r.json()).then(setHealth).catch(() => setHealth(undefined))
+      fetch('/api/v1/version').then((r) => r.json()).then(setVersion).catch(() => setVersion(undefined))
+    }
     load()
     const t = window.setInterval(load, 5000)
     return () => window.clearInterval(t)
@@ -146,7 +150,8 @@ function RuntimeControls() {
       <div className="sidebar-section">Runtime</div>
       {health ? (
         <div className="small">
-          <div>{health.ready ? '● ready' : '○ not ready'} · generation {health.generation}</div>
+          <div>{health.ready ? '● ready' : '○ not ready'} · generation {version?.generation ?? health.generation}</div>
+          {version && <div className="muted">release {version.release}</div>}
           <div className="muted">{health.hosts} live sessions{health.draining ? ' · draining' : ''}</div>
           {health.in_flight?.length > 0 && <div className="muted">{health.in_flight.length} tool call(s) in flight</div>}
           <div className="runtime-buttons">
