@@ -12,9 +12,9 @@ namespace Ainur.Core.Runtime;
 
 public sealed class RuntimeOptions {
 	public string Home { get; set; } = DefaultHome();
-	public string ManagerModelId { get; set; } = "deepseek-v4-pro";
-	public string SpecialistModelId { get; set; } = "deepseek-v4-pro";
-	public string CheapModelId { get; set; } = "deepseek-v4-flash";
+	public string ManagerModelId { get; set; } = "deepseek-v4.1-flash";
+	public string SpecialistModelId { get; set; } = "deepseek-v4.1-flash";
+	public string CheapModelId { get; set; } = "deepseek-v4.1-flash";
 	public decimal DefaultBudgetDollars { get; set; } = 5m;
 	public int MaxStepsPerWake { get; set; } = 80;
 	public int MaxOutputTokens { get; set; } = 32_000;
@@ -72,6 +72,7 @@ public sealed partial class AinurRuntime : IDisposable {
 		var registry = new ProviderRegistry();
 		registry.Register(DeepSeekProvider.CreateDefault());
 		registry.Register(ZaiProvider.CreateDefault());
+		registry.Register(OpenAiProvider.CreateDefault());
 		return registry;
 	}
 

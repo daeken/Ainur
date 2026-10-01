@@ -33,7 +33,7 @@ public class LiveZaiTests(ITestOutputHelper output) {
 	public async Task CrossProviderDelegationChargesSubscriptionEffectiveDollars() {
 		Skip.IfNot(HasKey, "no Z.ai credential");
 		using var home = new TempHome();
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-pro"; o.MaxStepsPerWake = 30; });
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 30; });
 		var p = rt.CreateProject("Cross provider", "Delegation across DeepSeek and Z.ai.", home.Workspace, budgetDollars: 1m);
 		rt.PostUserMessage(p.Id, """
 			Delegate this; do not do it yourself. Create one persistent specialist on model glm-5.3 and assign them: write

@@ -15,9 +15,12 @@ public static class ModelCatalog {
 	};
 
 	public static readonly IReadOnlyList<ModelInfo> Seed = [
-		M("deepseek-v4-pro", "deepseek", "deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000, "0.435", "0.003625", "0.87", "api", true, "Live-verified via /models on 2026-10-01.", 393_216),
-		M("deepseek-v4-flash", "deepseek", "deepseek-v4-flash", "DeepSeek V4 Flash", 1_000_000, "0.14", "0.0028", "0.28", "api", true, "Upstream currently answers as deepseek-flash; prices are the configured V4 Flash route.", 393_216),
-		M("deepseek-v4.1-flash", "deepseek", "deepseek-flash", "DeepSeek V4.1 Flash", 1_000_000, "0.30", "0.006", "1.20", "api", true, "Live-verified via /models on 2026-10-01.", 393_216),
+		// Single-model policy (2026-10-01): the owner reports the upstream route answers both the V4 Pro and V4 Flash ids
+		// as deepseek-flash. Only deepseek-v4.1-flash is assigned; the retired rows stay (disabled) so historical
+		// model_requests keep a catalog reference and their recorded prices.
+		M("deepseek-v4-pro", "deepseek", "deepseek-v4-pro", "DeepSeek V4 Pro", 1_000_000, "0.435", "0.003625", "0.87", "api", false, "Retired 2026-10-01: owner reports the upstream route serves this id as deepseek-v4.1-flash. Historical model_requests only; no new assignments.", 393_216),
+		M("deepseek-v4-flash", "deepseek", "deepseek-v4-flash", "DeepSeek V4 Flash", 1_000_000, "0.14", "0.0028", "0.28", "api", false, "Retired 2026-10-01: upstream answers this id as deepseek-flash, duplicating deepseek-v4.1-flash at stale prices. Historical model_requests only; no new assignments.", 393_216),
+		M("deepseek-v4.1-flash", "deepseek", "deepseek-flash", "DeepSeek V4.1 Flash", 1_000_000, "0.30", "0.006", "1.20", "api", true, "Live-verified via /models on 2026-10-01. Sole DeepSeek route for new assignments since 2026-10-01.", 393_216),
 		M("gpt-6", "openai", "gpt-6", "GPT 6", null, null, null, null, "subscription", false, "Adapter not implemented yet."),
 		M("gpt-6-astra", "openai", "gpt-6-astra", "GPT 6 Astra", null, null, null, null, "subscription", false, "Adapter not implemented yet."),
 		M("gpt-5.6-sol", "openai", "gpt-5.6-sol", "GPT 5.6 Sol", null, null, null, null, "subscription", false, "Adapter not implemented yet."),

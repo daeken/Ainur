@@ -2,6 +2,7 @@
 
 This is the starting model inventory for Ainur, based on the local configuration in `~/projects/FlatlineProxy` inspected on October 1, 2026. It records configured models and routes, with proposed assignments for the first team. No live provider calls or entitlement checks were performed. Availability, current billing rates, and complete provider capabilities still require validation when the integrations are implemented.
 
+**Assignment policy (2026-10-01).** The project owner reports that the DeepSeek V4 Pro and V4 Flash ids no longer exist upstream and are now served by the V4.1 Flash route, so Ainur standardizes on a single DeepSeek model: `deepseek-v4.1-flash` for managers, specialists, compaction, and the inexpensive service model (`RuntimeOptions.ManagerModelId`, `SpecialistModelId`, `CheapModelId`, `ContextPolicy.CompactorModelId`). `deepseek-v4-pro` and `deepseek-v4-flash` stay in the catalog as disabled rows because historical `model_requests` reference them and carry recorded prices; they must not receive new assignments. The inventory, routes, and rates below remain an accurate record of the inspected FlatlineProxy configuration as of October 1, 2026, which is a fact independent of this assignment policy.
 The primary source is the local, untracked `flatline.json`, which is the proxy's default configuration file. The checked-in example is different. FlatlineProxy source HEAD was `5f3ab4b`; that commit does not capture the local configuration. Source links below refer to this machine's adjacent FlatlineProxy checkout. Only model identifiers, routing behavior, capability metadata, and configured rates are summarized here; credentials and endpoint details are excluded.
 
 ## Proposed starting assignments
@@ -11,7 +12,7 @@ The primary source is the local, untracked `flatline.json`, which is the proxy's
 | Root manager | `gpt-6` | A current configured management candidate; delegates detailed work. |
 | Implementation specialist | `claude-sonnet-5` | A configured specialist candidate that exercises a different provider from the root. |
 | Independent verification specialist | `gpt-5.6-sol` | A configured coding model that gives verification a separate model from implementation. |
-| Routine knowledge worker | `deepseek-v4-flash` | A text-oriented candidate with low nonzero rates in the local configuration. |
+| Routine knowledge worker | `deepseek-v4.1-flash` | The single DeepSeek route in use since 2026-10-01 (see the assignment policy note above). |
 
 These assignments are proposed defaults, not claims of benchmarked suitability or globally optimal cost. A manager can change any assignment, reasoning setting, or team structure. Stronger models, lower-cost alternatives, and alternative providers below remain selectable. The routine knowledge-worker model is also a proposed starting choice for the inexpensive tool-finder service. If a route is unavailable, select an explicit alternative and record its identity and price; do not silently substitute a different model under the original model's name.
 
@@ -70,6 +71,8 @@ The following nonzero prices appear in local routing policies, expressed in USD 
 | DeepSeek direct V4 Flash | 0.14 | 0.0028 | 0.28 |
 | OpenRouter V4 Flash | 0.09 | Unspecified | 0.18 |
 | DeepSeek direct V4.1 Flash | 0.30 | 0.006 | 1.20 |
+
+Only the deepseek-v4.1-flash row is an active assignment rate as of 2026-10-01; the V4 Pro and V4 Flash rows are retained for historical settlement only.
 | OpenRouter V4.1 Flash | 0.15 | 0.015 | 0.60 |
 | Anthropic API Opus 4.8 and Opus 5 | 5.00 | Unspecified | 25.00 |
 | Anthropic API Sonnet 5 | 3.00 | Unspecified | 15.00 |

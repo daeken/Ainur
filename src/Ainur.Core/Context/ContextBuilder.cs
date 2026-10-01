@@ -24,7 +24,7 @@ public sealed class ContextPolicy {
 	public int? MaxContextTokens { get; set; }
 	public int ReservedOutputTokens { get; set; } = 16_000;
 	public int ToolTokenBudget { get; set; } = 14_000;
-	public string CompactorModelId { get; set; } = "deepseek-v4-flash";
+	public string CompactorModelId { get; set; } = "deepseek-v4.1-flash";
 
 	public int UsableBudget(ModelInfo model) {
 		var window = (int) ((model.ContextTokens ?? 128_000) * 0.95);

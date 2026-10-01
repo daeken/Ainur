@@ -14,7 +14,7 @@ namespace Ainur.Tests;
 public class LiveDeepSeekTests(ITestOutputHelper output) {
 	static readonly bool HasKey = Credentials.Resolve("deepseek") is not null;
 
-	static ModelInfo Flash => Ainur.Core.Accounting.ModelCatalog.Seed.First(m => m.Id == "deepseek-v4-flash");
+	static ModelInfo Flash => Ainur.Core.Accounting.ModelCatalog.Seed.First(m => m.Id == "deepseek-v4.1-flash");
 
 	void Dump(AinurRuntime rt, string projectId) {
 		foreach(var c in rt.Store.Conversation(projectId)) output.WriteLine($"[{c.Author}] {c.Body}");
@@ -54,7 +54,7 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 		Skip.IfNot(HasKey, "no DeepSeek credential");
 		using var home = new TempHome();
 		File.WriteAllText(Path.Combine(home.Workspace, "config.txt"), "name = old\nmode = slow\nlevel = 1\n");
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 25; });
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 25; });
 		var p = rt.CreateProject("Live edit", "Exercise file tools.", home.Workspace, budgetDollars: 0.5m);
 		rt.PostUserMessage(p.Id, "In config.txt, change 'name = old' to 'name = new' and 'mode = slow' to 'mode = fast' in a single multi_edit call, then use the powershell tool to run `Get-Content config.txt` to verify. Do this yourself; do not create agents. Reply with the final file contents.");
 		await Wait.Until(() => rt.Store.Conversation(p.Id).Any(c => c.Author == "manager"), TimeSpan.FromMinutes(4), "manager reply");
@@ -70,10 +70,10 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 	public async Task ManagerDelegatesToSpecialistWhoReportsBack() {
 		Skip.IfNot(HasKey, "no DeepSeek credential");
 		using var home = new TempHome();
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-pro"; o.SpecialistModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 30; });
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.SpecialistModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 30; });
 		var p = rt.CreateProject("Live delegation", "A tiny project to test delegation.", home.Workspace, budgetDollars: 1m);
 		rt.PostUserMessage(p.Id, """
-			Please delegate this; do not do it yourself. Create one persistent specialist on deepseek-v4-flash and assign them an
+			Please delegate this; do not do it yourself. Create one persistent specialist on deepseek-v4.1-flash and assign them an
 			objective: write primes.txt in the workspace containing the first ten prime numbers, one per line, and verify it with
 			PowerShell. When they report back with evidence, check the file yourself with read_file, mark the objective complete if
 			it is right, and tell me the result.
@@ -85,7 +85,7 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 		var agents = rt.Store.ListAgents(p.Id);
 		Assert.True(agents.Count >= 2);
 		var specialist = agents.First(a => a.ManagerId == p.RootAgentId);
-		Assert.Equal("deepseek-v4-flash", specialist.ModelId);
+		Assert.Equal("deepseek-v4.1-flash", specialist.ModelId);
 		Assert.Contains(rt.Store.ListObjectives(p.Id), o => o.OwnerId == specialist.Id || o.DelegatedById == p.RootAgentId);
 		var byAgent = rt.Ledger.ByAgent(p.Id);
 		Assert.True(byAgent[specialist.Id].Direct > 0);
@@ -95,8 +95,8 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 	public async Task LiveRollingAndFullCompaction() {
 		Skip.IfNot(HasKey, "no DeepSeek credential");
 		using var home = new TempHome();
-		var policy = new ContextPolicy { MaxContextTokens = 30_000, ReservedOutputTokens = 4_000, TriggerFraction = 0.55, RollingFraction = 0.5, ElideAfterTurns = 50, ToolTokenBudget = 20_000, CompactorModelId = "deepseek-v4-flash" };
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 40; o.PolicyOverride = (_, _) => policy; });
+		var policy = new ContextPolicy { MaxContextTokens = 30_000, ReservedOutputTokens = 4_000, TriggerFraction = 0.55, RollingFraction = 0.5, ElideAfterTurns = 50, ToolTokenBudget = 20_000, CompactorModelId = "deepseek-v4.1-flash" };
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 40; o.PolicyOverride = (_, _) => policy; });
 		var p = rt.CreateProject("Live compaction", "Exercise compaction.", home.Workspace, budgetDollars: 1m);
 		for(var i = 1; i <= 6; i++)
 			File.WriteAllText(Path.Combine(home.Workspace, $"part{i}.txt"), $"Secret word for part {i} is {(new[] { "amber", "basalt", "cobalt", "dune", "ember", "fjord" })[i - 1]}.\n" + string.Join("\n", Enumerable.Range(0, 300).Select(n => $"filler line {n} of part {i} lorem ipsum dolor sit amet")));
@@ -125,9 +125,9 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 	public async Task ConsultationForkAnswersFromConsultedContext() {
 		Skip.IfNot(HasKey, "no DeepSeek credential");
 		using var home = new TempHome();
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.SpecialistModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 20; });
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.SpecialistModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 20; });
 		var p = rt.CreateProject("Live consult", "Consultation test.", home.Workspace, budgetDollars: 0.5m);
-		var expert = rt.CreateAgent(p.Id, new NewAgent { Name = "Vairë", Title = "Archivist", Role = Roles.Specialist, ManagerId = p.RootAgentId, ModelId = "deepseek-v4-flash" }, p.RootAgentId);
+		var expert = rt.CreateAgent(p.Id, new NewAgent { Name = "Vairë", Title = "Archivist", Role = Roles.Specialist, ManagerId = p.RootAgentId, ModelId = "deepseek-v4.1-flash" }, p.RootAgentId);
 		// Give the expert private context that only exists in its own session.
 		rt.Notify(p.Id, NotificationTypes.Assignment, p.RootAgentId, expert.Id, "Remember this for later and reply with only the word 'noted': the vault code is 7319-TANGERINE. Do not write it anywhere.");
 		await Wait.Until(() => rt.Store.GetSession(expert.PrimarySessionId!)!.TurnCount >= 1 && rt.Store.GetAgent(expert.Id)!.State == AgentStates.Sleeping, TimeSpan.FromMinutes(2), "expert noted");
@@ -147,7 +147,7 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 	public async Task KnowledgeServiceAnswersWithReferences() {
 		Skip.IfNot(HasKey, "no DeepSeek credential");
 		using var home = new TempHome();
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 20; });
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 20; });
 		var p = rt.CreateProject("Live knowledge", "Knowledge test.", home.Workspace, budgetDollars: 0.5m);
 		Knowledge.Write(rt.Store, p.Id, "decisions/database", "Database choice", "decision", "We use SQLite in WAL mode for local persistence. Postgres was rejected for the bootstrap because it adds an external service.", p.RootAgentId, "design review 2026-09-30", null, null);
 		Knowledge.Write(rt.Store, p.Id, "requirements/ui", "UI stack", "requirement", "The UI must be React with TypeScript, built by Vite.", p.RootAgentId, "spec", null, null);
@@ -165,7 +165,7 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 		Skip.IfNot(HasKey, "no DeepSeek credential");
 		using var home = new TempHome();
 		var policy = new ContextPolicy { ToolTokenBudget = 4_500 };
-		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 25; o.PolicyOverride = (_, _) => policy; });
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 25; o.PolicyOverride = (_, _) => policy; });
 		// A large inventory of plausible tools the agent has never seen.
 		for(var i = 0; i < 120; i++)
 			rt.Tools.Register(new ScriptTool($"inventory_tool_{i:000}", $"Inventory helper number {i} for warehouse bin {i * 7} counting and stock audits.", Schema.Object(("bin", Schema.String("Bin id"), false)), "param($bin) 'ok'", ["inventory", "warehouse"], TimeSpan.FromSeconds(10)));

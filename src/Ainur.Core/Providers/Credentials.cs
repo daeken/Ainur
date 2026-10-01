@@ -12,7 +12,7 @@ public static class Credentials {
 
 	static readonly Dictionary<string, Source> Defaults = new(StringComparer.OrdinalIgnoreCase) {
 		["deepseek"] = new("DEEPSEEK_API_KEY", "ai.deepseek.api", "FlatlineProxy"),
-		["openai"] = new("OPENAI_API_KEY", null, null),
+		["openai"] = new("OPENAI_API_KEY", "ai.openai.api", null),
 		["anthropic"] = new("ANTHROPIC_API_KEY", null, null),
 		["xai"] = new("XAI_API_KEY", null, null),
 		["zai"] = new("ZAI_API_KEY", "ai.z.api", "FlatlineProxy"),
