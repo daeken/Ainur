@@ -360,8 +360,10 @@ public sealed class SessionHost : IDisposable {
 		Stop();
 		// A session owns only its own browser. Do not dispose the manager: sibling sessions in the
 		// same runtime may still be operating, and Runtime.Dispose closes the whole manager.
-		if(BrowserManager.TryFor(Runtime, out var browsers))
-			browsers!.CloseSessionAsync(SessionId).WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
+		if(BrowserManager.TryFor(Runtime, out var browsers)) {
+			try { browsers!.CloseSessionAsync(SessionId).WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult(); }
+			catch(Exception e) { Console.Error.WriteLine($"Browser session shutdown incomplete: {e.Message}"); }
+		}
 		Dispatcher.Post(() => Ps?.Dispose());
 		Dispatcher.Dispose();
 	}

@@ -30,6 +30,25 @@ public class BrowserLifecycleTests {
   Assert.False(next.IsRunning);
   Assert.Empty(manager.Active());
  }
+ [Fact] public async Task UnexpectedOwnedChromeExitCleansProfileBeforeSameKeyReacquires() {
+  using var home=new TempHome();using var rt=home.Runtime(new FakeProvider((_,_)=>FakeProvider.Text("unused")),start:false);
+  var manager=BrowserManager.For(rt);
+  using var ct=new CancellationTokenSource(TimeSpan.FromSeconds(25));
+  var first=await manager.AcquireAsync("external-exit","agent",new BrowserOptions {Width=400,Height=300},ct.Token);
+  var profile=first.ProfileDirectory;
+  Assert.True(Directory.Exists(profile));
+  try { System.Diagnostics.Process.GetProcessById(first.ProcessId).Kill(entireProcessTree:true); }
+  catch(InvalidOperationException) { /* exited between acquire and Kill */ }
+  await Wait.Until(()=>manager.Get("external-exit") is null && !Directory.Exists(profile),TimeSpan.FromSeconds(12),"exited Chrome profile cleanup");
+  Assert.False(first.IsRunning);
+  var next=await manager.AcquireAsync("external-exit","agent",new BrowserOptions {Width=400,Height=300},ct.Token);
+  Assert.NotSame(first,next);
+  await Task.Delay(300); // a late process-exit callback must not evict the new incarnation.
+  Assert.Same(next,manager.Get("external-exit"));
+  await manager.CloseSessionAsync("external-exit",ct:ct.Token);
+  Assert.False(Directory.Exists(profile));
+  Assert.Empty(manager.Active());
+ }
  [Fact] public async Task CancelledLaunchShouldLeaveNoProfileOrBrowser() {
   var root=Path.Combine(Path.GetTempPath(),"zz-cancel-browser-"+Guid.NewGuid().ToString("N"));
   Directory.CreateDirectory(root);

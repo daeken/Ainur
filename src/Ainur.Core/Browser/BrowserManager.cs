@@ -63,12 +63,12 @@ public sealed class BrowserManager : IAsyncDisposable {
 			AgentIds[sessionKey] = agentId;
 			session.Frame += frame => PublishFrame(sessionKey, agentId, session, frame);
 			session.Closed += _closedKey => {
-				// An old process's late Exited callback must not evict a replacement with the same key.
-				if(RemoveIfSame(sessionKey, session)) {
-					StartedAt.TryRemove(sessionKey, out _);
-					AgentIds.TryRemove(sessionKey, out _);
-					Emit("closed", new JsonObject { ["id"] = sessionKey, ["agent_id"] = agentId, ["reason"] = "browser exited" });
-				}
+				// Process.Exited can fire before the browser is disposed, or while DisposeAsync runs
+				// under the same key gate. Queue cleanup instead of recursively waiting for that gate.
+				_ = Task.Run(async () => {
+					try { await CloseIfSameAsync(sessionKey, session, "browser exited").ConfigureAwait(false); }
+					catch { /* shutdown/reaper can still close the identity-checked entry */ }
+				});
 			};
 			Emit("session", new JsonObject {
 				["id"] = sessionKey, ["agent_id"] = agentId, ["state"] = "streaming",
@@ -103,6 +103,10 @@ public sealed class BrowserManager : IAsyncDisposable {
 	}
 
 	async Task DisposeEntryAsync(string key, BrowserSession session, string reason) {
+		// Keep the entry visible until process, CDP socket and profile are cleaned. The key gate
+		// excludes reacquisition and the reaper while disposal awaits; a late Exited callback will
+		// only target this exact incarnation, never a replacement.
+		await session.DisposeAsync().ConfigureAwait(false);
 		if(RemoveIfSame(key, session)) {
 			StartedAt.TryRemove(key, out _);
 			AgentIds.TryRemove(key, out var agentId);
@@ -110,7 +114,6 @@ public sealed class BrowserManager : IAsyncDisposable {
 				["id"] = key, ["agent_id"] = agentId ?? "", ["reason"] = reason,
 			});
 		}
-		await session.DisposeAsync().ConfigureAwait(false);
 	}
 
 	void PublishFrame(string sessionKey, string agentId, BrowserSession session, BrowserFrame frame) {
