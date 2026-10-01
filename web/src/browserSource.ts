@@ -274,6 +274,7 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
   let pollTimer: number | undefined
   let es: EventSource | undefined
   let lastSeq = -1
+  let lastStartedAt: number | undefined
   let indexMissing = false
 
   const stop = () => {
@@ -293,6 +294,13 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
       const s = parseData<BrowserSessionInfo>(e)
       if (!s) return
       h.onEvent('session')
+      // A new browser incarnation can reuse the Ainur session id. Its seq restarts at 1, while a
+      // transport reconnect to the same incarnation replays the latest seq and must be deduped.
+      if (lastStartedAt !== undefined && lastStartedAt !== s.started_at) {
+        lastSeq = -1
+        h.onEvent('session:new-incarnation')
+      }
+      lastStartedAt = s.started_at
       h.onSession(s)
       if (s.state === 'ended') h.onStatus('no-session', 'browser session ended')
       else h.onStatus('streaming')
@@ -312,7 +320,11 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
       h.onEvent('closed')
       h.onEnded(c?.reason ?? 'closed')
       h.onStatus('no-session', c?.reason ? `session ended: ${c.reason}` : 'session ended')
-      stop()
+      // `closed` terminates THIS stream, not the agent's future browser sessions. Poll the index
+      // at the same modest cadence as an empty index so a later acquisition becomes visible.
+      src.close()
+      es = undefined
+      pollTimer = window.setTimeout(() => { void resolve() }, POLL_MS)
     })
 
     src.addEventListener('error', (e) => {
@@ -331,16 +343,22 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
           ? `the browser stream route ${base} is not deployed on this server yet`
           : `${url} could not be opened (fatal: unknown session, or the stream route is unavailable)`
         h.onStatus('no-session', detail)
-        stop()
+        src.close()
+        es = undefined
+        // On a real route, the browser may have ended during a transport outage. Refresh the
+        // authoritative index; don't reconnect-loop against an unknown session id (404).
+        if (!indexMissing) pollTimer = window.setTimeout(() => { void resolve() }, POLL_MS)
+        else stop()
         return
       }
       h.onStatus('disconnected', 'frame source dropped; the browser is retrying')
     })
   }
 
-  const resolve = async () => {
+  const resolve = async (initial = false) => {
     if (stopped) return
-    h.onStatus('connecting', 'resolving browser session')
+    // A background index poll must not flash 'connecting' over the ended/no-session overlay.
+    if (initial) h.onStatus('connecting', 'resolving browser session')
     const { target, indexMissing: missing } = await resolveTarget(base, agentId, hintSessionId)
     indexMissing = missing
     if (stopped) return
@@ -353,7 +371,7 @@ function createSseSource(base: string, agentId: string, hintSessionId: string | 
     attach(target.id)
   }
 
-  void resolve()
+  void resolve(true)
   return { stop }
 }
 
@@ -428,9 +446,12 @@ export function useBrowserStream(agentId: string | undefined, hintSessionId?: st
     timestampsRef.current = []
 
     const handlers: Handlers = {
-      onSession: setSession,
+      onSession: (s) => { setSession(s); setEndedReason(undefined); setDetail(s.state === 'idle' ? 'browser is idle' : undefined) },
       onFrame: (f) => {
         setFrame(f)
+        // The contract sends session metadata on connect, then per-frame URL/title as the page moves.
+        // Refresh the visible location from each frame rather than leaving the connect-time about:blank.
+        setSession((prev) => prev ? { ...prev, url: f.url, title: f.title } : prev)
         setFrameCount((n) => n + 1)
         const now = Date.now()
         if (noticeAtRef.current && now - noticeAtRef.current >= MIN_NOTICE_MS) {
@@ -445,6 +466,7 @@ export function useBrowserStream(agentId: string | undefined, hintSessionId?: st
       onStatus: (s, d) => {
         setStatus(s)
         if (d !== undefined) setDetail(d)
+        if (s === 'streaming') setEndedReason(undefined)
         if (s === 'disconnected') setAttempt((a) => a + 1)
       },
       onIgnoredFrame: () => setIgnoredFrames((n) => n + 1),

@@ -15,9 +15,9 @@ function StatusPill({ status, attempt }: { status: StreamStatus; attempt: number
 /**
  * Live embedded view of an agent's browser session.
  *
- * Backed by `useBrowserStream` (web/src/browserSource.ts): the local mock generator by default, or
- * Tulkas's SSE stream (`reference/browser-stream-contract`) when `?browserStream=<url>` or
- * `VITE_BROWSER_STREAM` is set.
+ * Backed by `useBrowserStream` (web/src/browserSource.ts): Tulkas's same-origin SSE route by
+ * default (`reference/browser-stream-contract`), or an explicit, labelled mock opt-in via
+ * `?browserStream=mock` / `VITE_BROWSER_STREAM=mock`. Other overrides may point to a fixture.
  */
 export function SessionBrowser({ agentId, agentName, sessionId }: { agentId: string; agentName: string; sessionId?: string }) {
   const b = useBrowserStream(agentId, sessionId)
@@ -50,8 +50,8 @@ export function SessionBrowser({ agentId, agentName, sessionId }: { agentId: str
       </div>
 
       {b.session && (
-        <div className="small muted browser-location mono" title={b.session.title}>
-          {b.session.url} · session {b.session.id} · agent {b.session.agent_id}
+        <div className="small muted browser-location mono" title={b.frame?.title ?? b.session.title}>
+          {b.frame?.url ?? b.session.url} · session {b.session.id} · agent {b.session.agent_id}
         </div>
       )}
 
