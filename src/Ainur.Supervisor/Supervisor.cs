@@ -58,6 +58,11 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 	public async Task<int> RunAsync() {
 		Http.DefaultRequestHeaders.Add("X-Ainur", "1");
 		var state = releases.LoadState();
+		if(state.Active is null && Directory.Exists(releases.Root) && Directory.GetDirectories(releases.Root).Select(Path.GetFileName).Where(d => !state.Failed.Contains(d!)).OrderDescending().FirstOrDefault() is { } newest) {
+			Log($"No active release recorded; selecting newest built release {newest}");
+			state.Active = newest;
+			releases.SaveState(state);
+		}
 		if(state.Active is null) {
 			if(opts.Source is null) {
 				Log("No active release and no --source to build one from.");
