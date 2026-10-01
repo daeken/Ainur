@@ -20,7 +20,10 @@ public sealed class NewAgent {
 }
 
 public sealed partial class AinurRuntime {
-	public Project CreateProject(string name, string description, string? workspacePath, decimal? budgetDollars = null, string? managerModelId = null, string managerName = "Manwë") {
+	public Project CreateProject(string name, string description, string? workspacePath, decimal? budgetDollars = null, string? managerModelId = null, string managerName = "Manwë",
+		bool? noEffectiveLimit = null, decimal? cashCeilingDollars = null) {
+		var limits = new Project();
+		ProjectBudgets.Apply(limits, budgetDollars ?? (noEffectiveLimit == true ? null : Options.DefaultBudgetDollars), noEffectiveLimit, cashCeilingDollars);
 		if(workspacePath is not null) {
 			workspacePath = Path.GetFullPath(workspacePath.StartsWith("~/") ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), workspacePath[2..]) : workspacePath);
 			Directory.CreateDirectory(workspacePath);
@@ -28,7 +31,7 @@ public sealed partial class AinurRuntime {
 		var now = Clock.Now;
 		var project = new Project {
 			Id = Ids.New("prj"), Name = name, Description = description, WorkspacePath = workspacePath, State = "active",
-			EffectiveBudgetNanos = Money.FromDollars(budgetDollars ?? Options.DefaultBudgetDollars), CreatedAt = now, UpdatedAt = now,
+			EffectiveBudgetNanos = limits.EffectiveBudgetNanos, CashCeilingNanos = limits.CashCeilingNanos, CreatedAt = now, UpdatedAt = now,
 		};
 		Db.Write(u => {
 			Store.InsertProject(u, project);
