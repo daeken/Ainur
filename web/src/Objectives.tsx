@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { api, ago, type Agent, type Objective, type Project } from './api'
+import { api, ago, dollars, type Agent, type Objective, type Project } from './api'
 
-interface Data { objectives: Objective[]; dependencies: { objective_id: string; depends_on_id: string }[] }
+interface Data { objectives: Objective[]; dependencies: { objective_id: string; depends_on_id: string }[]; spend?: Record<string, { direct_nanos: number; total_nanos: number }> }
 
 export function Objectives({ project, agents, tick, onSelectAgent }: { project: Project; agents: Agent[]; tick: number; onSelectAgent: (id: string) => void }) {
   const [data, setData] = useState<Data>({ objectives: [], dependencies: [] })
@@ -22,6 +22,7 @@ export function Objectives({ project, agents, tick, onSelectAgent }: { project: 
           {!o.required && <span className="badge">optional</span>}
           <button className="link small" onClick={(e) => { e.stopPropagation(); if (o.owner_id) onSelectAgent(o.owner_id) }}>{name(o.owner_id)}</button>
           {deps.length > 0 && <span className="small muted">depends on {deps.length}</span>}
+          {(data.spend?.[o.id]?.total_nanos ?? 0) > 0 && <span className="small muted">{dollars(data.spend![o.id].total_nanos)}</span>}
         </div>
         {kids.length > 0 && <ul>{kids.map(node)}</ul>}
       </li>
@@ -39,6 +40,7 @@ export function Objectives({ project, agents, tick, onSelectAgent }: { project: 
           <div className="small muted mono">{sel.id} · updated {ago(sel.updated_at)}</div>
           <p><b>Owner:</b> {name(sel.owner_id)}{sel.delegated_by_id && <> · delegated by {name(sel.delegated_by_id)}</>}</p>
           <p><b>State:</b> {sel.state}{sel.required ? '' : ' (optional for its parent)'}</p>
+          {data.spend?.[sel.id] && <p><b>Spending (effective):</b> {dollars(data.spend[sel.id].direct_nanos)} direct · {dollars(data.spend[sel.id].total_nanos)} including sub-objectives</p>}
           {sel.description && <p>{sel.description}</p>}
           <p><b>Completion conditions:</b> {sel.completion_conditions || <span className="muted">none recorded</span>}</p>
           <div><b>Dependencies:</b> {data.dependencies.filter((d) => d.objective_id === sel.id).map((d) => <button key={d.depends_on_id} className="link" onClick={() => setSelected(d.depends_on_id)}>{data.objectives.find((o) => o.id === d.depends_on_id)?.title ?? d.depends_on_id}</button>)}</div>

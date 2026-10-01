@@ -360,5 +360,9 @@ public static class Migrations {
 			ALTER TABLE sessions ADD COLUMN workspace_path TEXT;
 			ALTER TABLE sessions ADD COLUMN worktree_base TEXT;
 			"""),
+		(4, "request_tool_bindings", """
+			-- Exact tool name → version bindings declared to the model for each request; returned calls resolve against them.
+			ALTER TABLE model_requests ADD COLUMN tool_bindings TEXT;
+			"""),
 	];
 }

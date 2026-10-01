@@ -85,3 +85,33 @@ public class PowerShellTests {
 		Assert.Contains("do not survive restarts", results2.Last().Text);
 	}
 }
+
+public class ToolVersionTests {
+	[Fact]
+	public async Task CallsResolveAgainstTheVersionDeclaredInTheRequest() {
+		using var home = new TempHome();
+		Ainur.Core.Runtime.AinurRuntime? runtime = null;
+		Ainur.Core.Tools.ScriptTool Make(string body) => new("greet", "Greets.", Ainur.Core.Tools.Schema.Object(), body, [], TimeSpan.FromSeconds(10));
+		var provider = new FakeProvider((req, n) => {
+			if(n == 1) {
+				Assert.Contains(req.Tools, t => t.Name == "greet");
+				// The tool is revised after the request was dispatched but before its call executes.
+				runtime!.Tools.Register(Make("'v2'"), kind: "powershell");
+				return FakeProvider.Call("greet", "{}");
+			}
+			return n == 2 ? FakeProvider.Call("greet", "{}") : FakeProvider.Text("done");
+		});
+		runtime = home.Runtime(provider, start: false);
+		using var rt = runtime;
+		rt.Tools.Register(Make("'v1'"), kind: "powershell");
+		rt.Start("test");
+		var p = rt.CreateProject("V", "d", home.Workspace);
+		var root = rt.Store.GetAgent(p.RootAgentId!)!;
+		new Ainur.Core.Tools.ToolCache(rt.Store, rt.Tools, root.PrimarySessionId!).Load(["greet"], 100_000);
+		rt.PostUserMessage(p.Id, "go");
+		await Wait.Until(() => rt.Store.Conversation(p.Id).Any(c => c.Body == "done"), TimeSpan.FromSeconds(20), "done");
+		var results = rt.Store.Items(root.PrimarySessionId!).Where(i => i.Kind == "tool_result").Select(i => JsonUtil.Deserialize<Ainur.Core.Context.ToolResultPayload>(i.Payload)!).ToList();
+		Assert.Equal("v1", results[0].Text.Trim());
+		Assert.Equal("v2", results[1].Text.Trim());
+	}
+}

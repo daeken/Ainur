@@ -35,6 +35,13 @@ public static class Api {
 				var ping = host.Dispatcher.InvokeAsync(() => Task.FromResult(true));
 				if(await Task.WhenAny(ping, Task.Delay(TimeSpan.FromSeconds(3))) != ping && !host.IsRunning) stuck.Add(host.SessionId);
 			}
+			// A scheduler that cannot advance runnable work must fail health checks; an idle or blocked team must not.
+			var stalled = rt.Draining ? [] : rt.Db.Read(c => c.Query<string>("""
+				SELECT DISTINCT n.to_agent_id FROM notifications n JOIN agents a ON a.id = n.to_agent_id
+				WHERE n.state='pending' AND n.wakes=1 AND n.created_at < @cutoff AND a.state NOT IN ('paused','retired','terminated')
+				""", new { cutoff = Clock.Now - 180_000 }).AsList())
+				.Where(agentId => rt.Store.GetAgent(agentId)?.PrimarySessionId is { } sid && rt.ActivePause(sid) is null && !rt.LiveHosts.Any(h => h.SessionId == sid && h.IsRunning)).ToList();
+			stuck.AddRange(stalled.Select(a => $"stalled:{a}"));
 			var ready = dbOk && stuck.Count == 0;
 			return Results.Json(new {
 				ready, rt.Generation, schema = rt.Db.SchemaVersion, draining = rt.Draining, hosts = rt.LiveHosts.Count, stuck,
@@ -101,9 +108,16 @@ public static class Api {
 		api.MapPost("/agents/{id}/pause", (AinurRuntime rt, string id) => { rt.PauseAgent(id, null, "paused by the user"); return Results.Ok(); });
 		api.MapPost("/agents/{id}/resume", (AinurRuntime rt, string id) => { rt.ResumeAgent(id, null); return Results.Ok(); });
 
-		api.MapGet("/projects/{id}/objectives", (AinurRuntime rt, string id) => new {
-			objectives = rt.Store.ListObjectives(id),
-			dependencies = rt.Store.ListDependencies(id).Select(d => new { objective_id = d.ObjectiveId, depends_on_id = d.DependsOnId }),
+		api.MapGet("/projects/{id}/objectives", (AinurRuntime rt, string id) => {
+			var objectives = rt.Store.ListObjectives(id);
+			var direct = rt.Store.CostEvents(id).Where(e => e.ObjectiveId is not null).GroupBy(e => e.ObjectiveId!).ToDictionary(g => g.Key, g => g.Sum(e => e.EffectiveNanos));
+			var children = objectives.ToLookup(o => o.ParentId);
+			long Total(string oid) => direct.GetValueOrDefault(oid) + children[oid].Sum(c => Total(c.Id));
+			return new {
+				objectives,
+				dependencies = rt.Store.ListDependencies(id).Select(d => new { objective_id = d.ObjectiveId, depends_on_id = d.DependsOnId }),
+				spend = objectives.ToDictionary(o => o.Id, o => new { direct_nanos = direct.GetValueOrDefault(o.Id), total_nanos = Total(o.Id) }),
+			};
 		});
 
 		api.MapGet("/projects/{id}/conversation", (AinurRuntime rt, string id) => rt.Store.Conversation(id));

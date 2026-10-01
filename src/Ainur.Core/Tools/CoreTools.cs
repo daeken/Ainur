@@ -325,7 +325,7 @@ public static class AgentTools {
 	/// <summary>Reloads the latest active version of every agent-authored script tool after a restart.</summary>
 	public static void LoadPersisted(AinurRuntime rt) {
 		var rows = rt.Store.Db.Read(c => Dapper.SqlMapper.Query<(string Id, string Name, string? ProjectId, string Source)>(c,
-			"SELECT id, name, project_id, source FROM tool_versions WHERE kind='powershell' AND state='active' ORDER BY created_at").ToList());
+			"SELECT id, name, project_id, source FROM tool_versions WHERE kind='powershell' AND state='active' AND source IS NOT NULL ORDER BY created_at").ToList());
 		foreach(var row in rows) {
 			var def = JsonNode.Parse(row.Source)!;
 			var tool = new ScriptTool(row.Name, def["description"]!.GetValue<string>(), (JsonObject) def["input_schema"]!.DeepClone(), def["script"]!.GetValue<string>(),

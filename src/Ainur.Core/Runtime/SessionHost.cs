@@ -143,6 +143,7 @@ public sealed class SessionHost : IDisposable {
 				MaxOutputTokens = Math.Min(model.MaxOutputTokens ?? 32_000, Runtime.Options.MaxOutputTokens), ReasoningEffort = agent.ReasoningEffort,
 				EstimatedInputTokens = built.EstimatedTokens + tools.Sum(Schema.TokenEstimate), ContextRevision = built.Revision,
 				OnDelta = d => Delta?.Invoke(SessionId, d),
+				ToolBindings = tools.ToDictionary(t => t.Name, t => t.Version),
 			}, StopCts.Token);
 			var response = result.Response;
 			var assistant = new AssistantPayload {
@@ -169,9 +170,10 @@ public sealed class SessionHost : IDisposable {
 			}
 
 			var endTurn = false;
+			var bindings = tools.ToDictionary(t => t.Name, t => t.Version);
 			foreach(var call in response.ToolCalls) {
 				AtBoundary = false;
-				var r = await ExecuteCallAsync(call);
+				var r = await ExecuteCallAsync(call, bindings.GetValueOrDefault(call.Name));
 				endTurn |= r.EndsTurn;
 				AtBoundary = true;
 				if(StopCts.IsCancellationRequested) return;
@@ -228,8 +230,8 @@ public sealed class SessionHost : IDisposable {
 		});
 	}
 
-	async Task<ToolResult> ExecuteCallAsync(ToolCall call) {
-		var (result, invocation, tool) = await InvokeAsync(call.Name, call.Arguments, call.Id, null, StopCts.Token);
+	async Task<ToolResult> ExecuteCallAsync(ToolCall call, string? pinnedVersion) {
+		var (result, invocation, tool) = await InvokeAsync(call.Name, call.Arguments, call.Id, null, StopCts.Token, pinnedVersion);
 		RecordResult(call, invocation, tool, result);
 		return result;
 	}
@@ -252,10 +254,20 @@ public sealed class SessionHost : IDisposable {
 		return result;
 	}
 
-	async Task<(ToolResult, ToolInvocation, ITool?)> InvokeAsync(string name, string arguments, string callId, string? parentId, CancellationToken ct) {
+	async Task<(ToolResult, ToolInvocation, ITool?)> InvokeAsync(string name, string arguments, string callId, string? parentId, CancellationToken ct, string? pinnedVersion = null) {
 		var session = Session;
 		var agent = Agent;
-		var tool = Runtime.Tools.Get(name);
+		// Calls resolve against the exact version declared in the request, never silently rebinding to a newer one.
+		var tool = pinnedVersion is not null ? Runtime.Tools.GetVersion(pinnedVersion) : Runtime.Tools.Get(name);
+		if(pinnedVersion is not null && tool is null) {
+			var conflict = ToolResult.Error($"Tool version conflict: this call was issued against {pinnedVersion}, which is no longer available (current: {Runtime.Tools.Get(name)?.Version ?? "none"}). Re-check the current schema and call again if appropriate.");
+			var failed = new ToolInvocation {
+				Id = Ids.New("inv"), ProjectId = session.ProjectId, SessionId = SessionId, AgentId = AgentId, CallId = callId, ToolName = name, ToolVersion = pinnedVersion,
+				Arguments = arguments, State = InvocationStates.Failed, Error = conflict.Text, ParentInvocationId = parentId, CreatedAt = Clock.Now, FinishedAt = Clock.Now,
+			};
+			Runtime.Store.Db.Write(u => Runtime.Store.InsertInvocation(u, failed));
+			return (conflict, failed, null);
+		}
 		var invocation = new ToolInvocation {
 			Id = Ids.New("inv"), ProjectId = session.ProjectId, SessionId = SessionId, AgentId = AgentId, CallId = callId, ToolName = name,
 			ToolVersion = tool?.Version ?? "unknown", Arguments = arguments, State = InvocationStates.Queued, ParentInvocationId = parentId, CreatedAt = Clock.Now,

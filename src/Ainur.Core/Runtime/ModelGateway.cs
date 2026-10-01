@@ -21,6 +21,7 @@ public sealed class ModelCall {
 	public int? EstimatedInputTokens { get; init; }
 	public int? ContextRevision { get; init; }
 	public Action<StreamDelta>? OnDelta { get; init; }
+	public Dictionary<string, string>? ToolBindings { get; init; }
 }
 
 public sealed record ModelCallResult(ProviderResponse Response, ModelRequestRecord Record, CostEvent? Cost);
@@ -45,6 +46,8 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		// Intent and reservation commit before dispatch so a crash leaves evidence of a possibly-billed request.
 		store.Db.Write(u => {
 			store.InsertModelRequest(u, record);
+			if(call.ToolBindings is not null)
+				u.Execute("UPDATE model_requests SET tool_bindings=@b WHERE id=@Id", new { b = JsonUtil.Serialize(call.ToolBindings), record.Id });
 			ledger.Reserve(u, call.ProjectId, record.Id, quote);
 			u.Journal("model.dispatched", call.ProjectId, "model_request", record.Id, call.AgentId, new { call.Purpose, model = call.Model.Id, estimate, reserved_effective = quote.ReservedEffectiveNanos });
 		});
