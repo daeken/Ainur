@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, ago, dollars, type Agent, type Objective, type Session, type SessionItem } from './api'
 import { Markdown } from './Markdown'
+import { SessionBrowser } from './SessionBrowser'
 
 interface AgentDetail {
   agent: Agent & { instructions: string; termination_condition?: string }
@@ -32,7 +33,7 @@ interface ContextInfo {
 export function AgentPanel({ agentId, agents, tick, onClose, onSelect }: { agentId: string; agents: Agent[]; tick: number; onClose: () => void; onSelect: (id: string) => void }) {
   const [detail, setDetail] = useState<AgentDetail>()
   const [sessionId, setSessionId] = useState<string>()
-  const [view, setView] = useState<'overview' | 'context' | 'transcript'>('overview')
+  const [view, setView] = useState<'overview' | 'browser' | 'context' | 'transcript'>('overview')
   useEffect(() => { api.get<AgentDetail>(`/agents/${agentId}`).then((d) => { setDetail(d); setSessionId((s) => s && d.sessions.some((x) => x.id === s) ? s : d.agent.primary_session_id ?? d.sessions[0]?.id) }).catch(console.error) }, [agentId, tick])
   if (!detail) return <aside className="panel" />
   const a = detail.agent
@@ -43,11 +44,12 @@ export function AgentPanel({ agentId, agents, tick, onClose, onSelect }: { agent
         <div>
           <h2>{a.name}</h2>
           <div className="small muted">{a.title} · {a.role} · {a.lifetime} · <span className="mono">{a.id}</span></div>
+          <div className="small muted"><span className="mono">{a.model_id}</span>{a.reasoning_effort && <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span>}</div>
         </div>
         <button className="link" onClick={onClose}>✕</button>
       </div>
       <div className="panel-tabs">
-        {(['overview', 'context', 'transcript'] as const).map((v) => <button key={v} className={view === v ? 'active' : ''} onClick={() => setView(v)}>{v}</button>)}
+        {(['overview', 'browser', 'context', 'transcript'] as const).map((v) => <button key={v} className={view === v ? 'active' : ''} onClick={() => setView(v)}>{v}</button>)}
       </div>
       {view === 'overview' && (
         <div className="panel-body">
@@ -57,7 +59,7 @@ export function AgentPanel({ agentId, agents, tick, onClose, onSelect }: { agent
           </span></p>
           <p><b>Manager:</b> {detail.manager ? <button className="link" onClick={() => onSelect(detail.manager!.id)}>{detail.manager.name}</button> : 'none (root manager; talks to the user)'}</p>
           {detail.reports.length > 0 && <p><b>Reports:</b> {detail.reports.map((r) => <button key={r.id} className="link" onClick={() => onSelect(r.id)}>{r.name}</button>)}</p>}
-          <p><b>Model:</b> <span className="mono">{a.model_id}</span>{a.reasoning_effort ? ` (${a.reasoning_effort})` : ''} · compaction {a.compaction_mode}</p>
+          <p><b>Model:</b> <span className="mono">{a.model_id}</span>{a.reasoning_effort ? <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span> : <span className="small muted"> (no reasoning effort)</span>} · compaction {a.compaction_mode}</p>
           <p><b>Spending:</b> direct {dollars(detail.spend.direct_nanos)} (cash {dollars(detail.spend.cash_direct_nanos)}) · delegated {dollars(detail.spend.delegated_nanos)}</p>
           <div><b>Owned objectives</b></div>
           {detail.objectives.length === 0 ? <div className="small muted">none</div> : detail.objectives.map((o) => <div key={o.id} className="small"><span className={`state-pill ${o.state}`}>{o.state}</span> {o.title}</div>)}
@@ -72,6 +74,7 @@ export function AgentPanel({ agentId, agents, tick, onClose, onSelect }: { agent
           ))}
         </div>
       )}
+      {view === 'browser' && <SessionBrowser agentId={a.id} agentName={a.name} sessionId={sessionId} />}
       {view === 'context' && sessionId && <ContextView sessionId={sessionId} tick={tick} />}
       {view === 'transcript' && sessionId && <Transcript sessionId={sessionId} tick={tick} />}
     </aside>

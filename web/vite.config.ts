@@ -4,5 +4,7 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   build: { outDir: '../src/Ainur.Server/wwwroot', emptyOutDir: true },
-  server: { proxy: { '/api': { target: 'http://127.0.0.1:5180', changeOrigin: false } } },
+  // Dev server proxies the API to the running Ainur server. Override the target when your
+  // server is not on the default port: AINUR_DEV_API=http://127.0.0.1:5181 npm run dev
+  server: { proxy: { '/api': { target: process.env.AINUR_DEV_API ?? 'http://127.0.0.1:5180', changeOrigin: false } } },
 })

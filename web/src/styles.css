@@ -154,3 +154,23 @@ code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); 
 .row { display: flex; gap: 8px; }
 .pause-note { color: var(--warn); margin-top: 4px; }
 .consult-note { color: var(--accent); margin-top: 4px; border-left: 2px dashed var(--accent); padding-left: 6px; }
+
+.effort-badge { color: var(--accent); border-color: var(--accent); font-family: var(--mono); }
+
+.browser-panel { display: flex; flex-direction: column; gap: 8px; }
+.browser-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.browser-toolbar .grow { flex: 1; }
+.browser-source { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.browser-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-viewport { position: relative; background: #101010; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 10; display: flex; align-items: center; justify-content: center; }
+.browser-viewport img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.browser-placeholder { color: #8d8a84; font-size: 13px; padding: 40px; text-align: center; }
+.browser-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(16, 16, 16, 0.55); }
+.browser-overlay.soft { background: rgba(16, 16, 16, 0.35); }
+.browser-overlay-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; max-width: 300px; display: flex; flex-direction: column; gap: 6px; text-align: center; align-items: center; }
+.browser-footer { display: flex; gap: 6px; }
+.browser-dev-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; border-top: 1px dashed var(--border); padding-top: 8px; }
+.state-pill.browser-status.streaming { color: var(--good); border-color: var(--good); }
+.state-pill.browser-status.connecting { color: var(--warn); border-color: var(--warn); }
+.state-pill.browser-status.disconnected { color: var(--bad); border-color: var(--bad); }
+.state-pill.browser-status.closed, .state-pill.browser-status.no-session { color: var(--muted); }

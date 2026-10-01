@@ -15,7 +15,7 @@ export function OrgChart({ agents, deltas, selected, onSelect }: { agents: Agent
           <div className="agent-name">{a.name} <span className="badge">{a.role === 'manager' ? 'Vala · manager' : 'Maia · specialist'}</span>{a.lifetime === 'ephemeral' && <span className="badge">ephemeral</span>}</div>
           <div className="small muted">{a.title}</div>
           <div className="small"><span className={`dot ${a.status && a.status !== 'idle' ? 'busy' : ''}`} />{a.state}{a.status && a.status !== 'idle' ? ` · ${a.status}` : ''}</div>
-          <div className="small muted mono">{a.model_id}</div>
+          <div className="small muted"><span className="mono">{a.model_id}</span>{a.reasoning_effort && <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span>}</div>
           <div className="small">direct {dollars(a.direct_nanos)}{a.delegated_nanos > 0 ? ` · delegated ${dollars(a.delegated_nanos)}` : ''}</div>
           {a.pause && <div className="small pause-note">⏸ paused by {a.pause.requester} ({a.pause.state}) on {a.pause.scope}: {a.pause.reason}; until {a.pause.release_condition}</div>}
           {(a.consultations ?? []).map((c) => <div key={c.id} className="small consult-note">↳ consultation fork from #{c.checkpoint}: {c.question?.slice(0, 140)}</div>)}
