@@ -28,7 +28,7 @@ public sealed class ScriptedGatewayProvider(string id, params Func<ProviderReque
 	public static ProviderException BadRequest() => new("bad request", 400, retryable: false, mayHaveBilled: false);
 }
 
-public class ModelGatewayFallbackTests {
+public class ModelGatewayFallbackTests(Xunit.Abstractions.ITestOutputHelper output) {
 	static ModelInfo Model(string id, string billing, string? fallback = null) => new() {
 		Id = id, Provider = "deepseek", UpstreamModel = id, Billing = billing, Enabled = true, FallbackModelId = fallback,
 	};
@@ -70,6 +70,8 @@ public class ModelGatewayFallbackTests {
 			Assert.Contains("prim", fo.Payload);
 			Assert.Contains("fall", fo.Payload);
 			Assert.Contains("auth", fo.Payload);
+			Assert.Equal(failed[0].Id, fo.EntityId);
+			output.WriteLine($"failed_request={failed[0].Id} model={failed[0].ModelId} state={failed[0].State}; journal kind={fo.Kind} entity_type={fo.EntityType} entity_id={fo.EntityId} payload={fo.Payload}");
 		}
 	}
 
@@ -108,7 +110,8 @@ public class ModelGatewayFallbackTests {
 			var deltas = new List<StreamDelta>();
 			await Assert.ThrowsAsync<ProviderException>(() => rt.Gateway.CallAsync(Call(projectId, primary, d => deltas.Add(d)), default));
 			Assert.Contains(deltas, d => d.Text == "partial");
-			Assert.Single(rt.Store.ModelRequestsInState("failed"));
+			Assert.Single(rt.Store.ModelRequestsInState("unknown"));
+			Assert.Single(rt.Store.CostEvents(projectId));
 			Assert.Empty(rt.Store.ModelRequestsInState("succeeded"));
 			Assert.DoesNotContain(rt.Store.Events(projectId), e => e.Kind == "model.failover");
 		}
@@ -187,6 +190,46 @@ public class ModelGatewayFallbackTests {
 			Assert.Empty(rt.Store.ModelRequestsInState("succeeded"));
 			Assert.Empty(rt.Store.ModelRequestsInState("failed"));
 			Assert.Empty(rt.Store.ModelRequestsInState("dispatched"));
+		}
+	}
+
+	[Fact]
+	public async Task Validation422NeverCallsFallback() {
+		var (rt, home, primary, _, projectId) = Setup(
+			(_, _) => throw new ProviderException("validation", 422, retryable: false, mayHaveBilled: false),
+			(_, _) => ScriptedGatewayProvider.Ok("must not run"));
+		using(home) {
+			await Assert.ThrowsAsync<ProviderException>(() => rt.Gateway.CallAsync(Call(projectId, primary), default));
+			Assert.Equal(1, ((ScriptedGatewayProvider) rt.Providers.Get("deepseek")).Calls);
+			Assert.Single(rt.Store.ModelRequestsInState("failed"));
+			Assert.Empty(rt.Store.CostEvents(projectId));
+			Assert.DoesNotContain(rt.Store.Events(projectId), e => e.Kind == "model.failover");
+		}
+	}
+
+	[Fact]
+	public async Task StaleEnabledPrimaryCannotBypassStoredDisabledRow() {
+		var (rt, home, primary, _, projectId) = Setup((_, _) => ScriptedGatewayProvider.Ok("must not run"));
+		using(home) {
+			rt.Db.Write(u => u.Execute("UPDATE models SET enabled=0 WHERE id=@Id", new { primary.Id }));
+			Assert.True(primary.Enabled);
+			var ex = await Assert.ThrowsAsync<DomainException>(() => rt.Gateway.CallAsync(Call(projectId, primary), default));
+			Assert.Contains("disabled", ex.Message);
+			Assert.Equal(0, ((ScriptedGatewayProvider) rt.Providers.Get("deepseek")).Calls);
+			Assert.Empty(rt.Store.ModelRequestsInState("succeeded"));
+		}
+	}
+
+	[Fact]
+	public async Task DeltasWithoutCallerCallbackStillBlockFailoverAndSettleEstimate() {
+		var (rt, home, primary, _, projectId) = Setup(
+			(_, delta) => { delta?.Invoke(new("content", "partial")); throw ScriptedGatewayProvider.Auth(); },
+			(_, _) => ScriptedGatewayProvider.Ok("must not run"));
+		using(home) {
+			await Assert.ThrowsAsync<ProviderException>(() => rt.Gateway.CallAsync(Call(projectId, primary), default));
+			Assert.Equal(1, ((ScriptedGatewayProvider) rt.Providers.Get("deepseek")).Calls);
+			Assert.Single(rt.Store.ModelRequestsInState("unknown"));
+			Assert.Single(rt.Store.CostEvents(projectId));
 		}
 	}
 

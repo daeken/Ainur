@@ -136,3 +136,20 @@ References point into the local FlatlineProxy checkout inspected for this draft:
 - Exact route-key matching and route-cost estimation: [src/routing.rs](/Users/daeken/projects/FlatlineProxy/src/routing.rs:47).
 - Reasoning mappings: [src/adapters.rs](/Users/daeken/projects/FlatlineProxy/src/adapters.rs:423).
 - Anthropic request translation: [src/adapters.rs](/Users/daeken/projects/FlatlineProxy/src/adapters.rs:521).
+
+### Catalog reseeding and operator notes
+
+Catalog-row `notes` are **code-owned** and replaced by `ModelCatalog.EnsureSeeded`
+on startup. Operator annotations on a seeded id (for example, "pinned by operator")
+will be lost. This is intentional here; no schema or seed merge policy is changed.
+For operator-specific models and annotations, create a non-catalog row with a unique
+id; reseeding leaves those rows untouched. Do not use seeded-row notes as durable
+operator configuration.
+
+Gateway fallback excludes request-validation failures (HTTP 400 and 422). The
+stored row is re-read at call time so a stale enabled object cannot bypass a stored
+disabled flag. `model.failover` references the failed attempt's actual request id.
+If any output delta is observed, the attempt is treated as possibly billed even
+when the provider labels its error unbilled: it settles the same conservative
+input estimate as cancellation, never releases at zero or retries elsewhere.
+This holds even when the caller does not subscribe to streaming callbacks.

@@ -39,20 +39,21 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		var estimate = call.EstimatedInputTokens
 			?? call.Messages.Sum(Context.ContextBuilder.MessageTokens)
 			+ call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
-		var chain = BuildChain(call.Model);
+		var chain = BuildChain(store.GetModel(call.Model.Id) ?? call.Model);
 		for(var i = 0; i < chain.Count; i++) {
-			var model = chain[i];
+			var model = store.GetModel(chain[i].Id) ?? chain[i];
 			if(!model.Enabled)
 				throw new DomainException($"Model '{model.Id}' is disabled and cannot be called.");
 			var emitted = false;
-			Action<StreamDelta>? onDelta = call.OnDelta is null ? null : d => { emitted = true; call.OnDelta!(d); };
+			Action<StreamDelta> onDelta = d => { emitted = true; call.OnDelta?.Invoke(d); };
+			var requestId = Ids.New("req");
 			try {
-				return await AttemptAsync(call, model, estimate, onDelta, ct);
+				return await AttemptAsync(call, model, requestId, estimate, onDelta, () => emitted, ct);
 			} catch(Exception e) {
 				var cause = FailoverClass(e);
 				if(i + 1 < chain.Count && !emitted && cause is not null) {
 					var fallback = chain[i + 1];
-					store.Db.Write(u => u.Journal("model.failover", call.ProjectId, "model_request", Ids.New("req"), call.AgentId, new {
+					store.Db.Write(u => u.Journal("model.failover", call.ProjectId, "model_request", requestId, call.AgentId, new {
 						call.Purpose, primary = model.Id, fallback = fallback.Id, cause, error = TextUtil.Truncate(e.Message, 500),
 					}));
 					continue;
@@ -85,18 +86,18 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			if(s is 401 or 403) return "auth";
 			if(s is 402 or 429) return "quota";
 			if(s >= 500) return "upstream";
-			if(s is 404 or 422) return "model_unavailable";
+			if(s == 404) return "model_unavailable"; // 422 is request validation, not model availability.
 			return null;
 		}
 		// No HTTP status: a transport/connect failure is retryable; configuration errors are not.
 		return pe.Retryable ? "unavailable" : null;
 	}
 
-	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, long estimate, Action<StreamDelta>? onDelta, CancellationToken ct) {
+	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
 		var provider = providers.Get(model.Provider);
 		var quote = Pricing.Quote(model, estimate, call.MaxOutputTokens);
 		var record = new ModelRequestRecord {
-			Id = Ids.New("req"), ProjectId = call.ProjectId, SessionId = call.SessionId, AgentId = call.AgentId, ObjectiveId = call.ObjectiveId,
+			Id = requestId, ProjectId = call.ProjectId, SessionId = call.SessionId, AgentId = call.AgentId, ObjectiveId = call.ObjectiveId,
 			Purpose = call.Purpose, ModelId = model.Id, Provider = model.Provider, UpstreamModel = model.UpstreamModel,
 			State = "dispatched", Quote = JsonUtil.Serialize(quote), ContextRevision = call.ContextRevision, StartedAt = Clock.Now,
 		};
@@ -125,7 +126,8 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		try {
 			response = await provider.CompleteAsync(request, onDelta, ct);
 		} catch(Exception e) {
-			var mayHaveBilled = e is ProviderException { MayHaveBilled: true } || e is OperationCanceledException;
+			// Observed output overrides a provider's unbilled claim, even without a caller callback.
+			var mayHaveBilled = emitted() || e is ProviderException { MayHaveBilled: true } || e is OperationCanceledException;
 			store.Db.Write(u => {
 				record.State = mayHaveBilled ? "unknown" : "failed";
 				record.Error = e.Message;
