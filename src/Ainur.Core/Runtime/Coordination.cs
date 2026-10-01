@@ -102,4 +102,24 @@ public sealed partial class AinurRuntime {
 			GetHost(r.RequesterSessionId)?.Wake();
 		}
 	}
+
+	/// <summary>
+	/// Tells the agent that requested an upgrade how it ended (on whichever runtime is now serving), so the requesting
+	/// work resumes after the restart instead of waiting for an unrelated wake.
+	/// </summary>
+	public void ReportUpgradeOutcome(string attemptId, string state, string releaseId, string detail) {
+		var origin = Db.Read(c => c.QueryFirstOrDefault<(string? AgentId, string? ProjectId)>(
+			"SELECT agent_id, project_id FROM events WHERE kind='upgrade.requested' AND entity_id=@attemptId ORDER BY id LIMIT 1", new { attemptId }));
+		Db.Write(u => {
+			u.Execute("UPDATE upgrade_attempts SET state=@state, detail=@detail, updated_at=@now WHERE id=@attemptId", new { state, detail, attemptId, now = Clock.Now });
+			u.Journal($"upgrade.outcome", origin.ProjectId, "upgrade_attempt", attemptId, origin.AgentId, new { state, release = releaseId, detail, generation = Generation });
+		});
+		if(origin.AgentId is null || origin.ProjectId is null) return;
+		var text = state switch {
+			"succeeded" => $"Upgrade {attemptId} succeeded: this runtime (generation {Generation}) is release {releaseId}. Continue the work that requested it, e.g. confirm the change on the running instance.",
+			"rolled_back" => $"Upgrade {attemptId} to {releaseId} FAILED and was rolled back automatically: {detail}. The candidate is suppressed from reactivation; investigate and repair.",
+			_ => $"Upgrade {attemptId} to {releaseId} ended as {state}: {detail}.",
+		};
+		Notify(origin.ProjectId, NotificationTypes.System, null, origin.AgentId, text, dedupe: $"upgrade-outcome:{attemptId}:{state}");
+	}
 }

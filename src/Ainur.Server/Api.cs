@@ -12,6 +12,7 @@ public sealed record CreateProjectRequest(string Name, string? Description, stri
 public sealed record UpdateProjectRequest(decimal? BudgetDollars, decimal? CashCeilingDollars, bool? ClearCashCeiling, string? Description);
 public sealed record MessageRequest(string Text);
 public sealed record DrainRequest(int? TimeoutSeconds);
+public sealed record UpgradeOutcome(string AttemptId, string State, string ReleaseId, string? Detail);
 
 public static class Api {
 	public static void Map(WebApplication app) {
@@ -177,6 +178,10 @@ public static class Api {
 			return Results.Json(new { drained, running = rt.LiveHosts.Where(h => h.IsRunning).Select(h => h.SessionId) });
 		});
 		api.MapPost("/control/undrain", (AinurRuntime rt) => { rt.Undrain(); return Results.Ok(); });
+		api.MapPost("/control/upgrade-outcome", (AinurRuntime rt, UpgradeOutcome outcome) => {
+			rt.ReportUpgradeOutcome(outcome.AttemptId, outcome.State, outcome.ReleaseId, outcome.Detail ?? "");
+			return Results.Ok();
+		});
 		api.MapPost("/control/stop", (IHostApplicationLifetime life) => { life.StopApplication(); return Results.Ok(); });
 	}
 

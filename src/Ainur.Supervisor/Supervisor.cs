@@ -222,6 +222,7 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			Log("Drain did not complete; aborting upgrade");
 			try { await Http.PostAsync("api/v1/control/undrain", null); } catch { }
 			RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "drain deadline expired");
+			await ReportOutcomeAsync(attempt, "aborted", req.ReleaseId, "drain deadline expired; the previous runtime kept serving");
 			return;
 		}
 		RecordAttempt(attempt, req.ReleaseId, previous, "activating", "");
@@ -242,6 +243,7 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			releases.SaveState(state);
 			RecordAttempt(attempt, req.ReleaseId, previous, "succeeded", "");
 			Log($"Upgrade {attempt} succeeded; active release {req.ReleaseId}");
+			await ReportOutcomeAsync(attempt, "succeeded", req.ReleaseId, "");
 		} else {
 			Log($"Upgrade {attempt} failed readiness or probation; rolling back to {previous}");
 			KillRuntime();
@@ -250,6 +252,15 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			StartRuntime(previous);
 			await WaitReadyAsync(opts.ReadyTimeout);
 			RecordAttempt(attempt, req.ReleaseId, previous, "rolled_back", "candidate failed readiness or probation");
+			await ReportOutcomeAsync(attempt, "rolled_back", req.ReleaseId, "candidate failed readiness or probation");
+		}
+	}
+
+	async Task ReportOutcomeAsync(string attempt, string state, string release, string detail) {
+		try {
+			await Http.PostAsync("api/v1/control/upgrade-outcome", JsonContent.Create(new { attempt_id = attempt, state, release_id = release, detail }));
+		} catch(Exception e) {
+			Log($"Could not report upgrade outcome: {e.Message}");
 		}
 	}
 
