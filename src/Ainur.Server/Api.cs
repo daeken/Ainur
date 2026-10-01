@@ -8,8 +8,8 @@ using Dapper;
 
 namespace Ainur.Server;
 
-public sealed record CreateProjectRequest(string Name, string? Description, string? WorkspacePath, decimal? BudgetDollars, string? ManagerModel, string? ManagerName);
-public sealed record UpdateProjectRequest(decimal? BudgetDollars, decimal? CashCeilingDollars, bool? ClearCashCeiling, string? Description);
+public sealed record CreateProjectRequest(string Name, string? Description, string? WorkspacePath, decimal? BudgetDollars, string? ManagerModel, string? ManagerName, bool? NoEffectiveLimit = null, decimal? CashCeilingDollars = null);
+public sealed record UpdateProjectRequest(decimal? BudgetDollars, decimal? CashCeilingDollars, bool? ClearCashCeiling, string? Description, bool? NoEffectiveLimit = null);
 public sealed record SetAgentModelRequest(string? ModelId, string? ReasoningEffort);
 public sealed record MessageRequest(string Text);
 public sealed record DrainRequest(int? TimeoutSeconds);
@@ -62,7 +62,7 @@ public static class Api {
 
 		api.MapPost("/projects", (AinurRuntime rt, CreateProjectRequest req) => {
 			try {
-				var p = rt.CreateProject(req.Name, req.Description ?? "", req.WorkspacePath, req.BudgetDollars, req.ManagerModel, req.ManagerName ?? "Manwë");
+				var p = rt.CreateProject(req.Name, req.Description ?? "", req.WorkspacePath, req.BudgetDollars, req.ManagerModel, req.ManagerName ?? "Manwë", req.NoEffectiveLimit, req.CashCeilingDollars);
 				return Results.Json(ProjectView(rt, p));
 			} catch(DomainException e) {
 				return Results.BadRequest(new { error = e.Message });
@@ -74,16 +74,11 @@ public static class Api {
 		api.MapPatch("/projects/{id}", (AinurRuntime rt, string id, UpdateProjectRequest req) => {
 			var p = rt.Store.GetProject(id);
 			if(p is null) return Results.NotFound();
-			if(req.BudgetDollars is { } b) p.EffectiveBudgetNanos = Money.FromDollars(b);
-			if(req.CashCeilingDollars is { } c) p.CashCeilingNanos = Money.FromDollars(c);
-			if(req.ClearCashCeiling == true) p.CashCeilingNanos = null;
-			if(req.Description is { } d) p.Description = d;
-			rt.Db.Write(u => {
-				rt.Store.UpdateProject(u, p);
-				u.Journal("project.updated", p.Id, "project", p.Id, payload: new { budget = p.EffectiveBudgetNanos, cash_ceiling = p.CashCeilingNanos });
-			});
-			// New funds may unblock agents paused by exhaustion; the user resumes them through the manager or controls.
-			return Results.Json(ProjectView(rt, p));
+			try {
+				p = rt.UpdateProjectBudget(id, req.BudgetDollars, req.NoEffectiveLimit, req.CashCeilingDollars, req.ClearCashCeiling == true, req.Description);
+				// Updated limits do not implicitly resume agents paused by exhaustion.
+				return Results.Json(ProjectView(rt, p));
+			} catch(DomainException e) { return Results.BadRequest(new { error = e.Message }); }
 		});
 
 		api.MapGet("/projects/{id}/agents", (AinurRuntime rt, string id) => {
@@ -233,6 +228,8 @@ public static class Api {
 
 	static object ProjectView(AinurRuntime rt, Project p) => new {
 		p.Id, p.Name, p.Description, p.WorkspacePath, p.RootAgentId, p.RootObjectiveId, p.State, p.EffectiveBudgetNanos, p.CashCeilingNanos, p.CreatedAt,
+		no_effective_limit = p.EffectiveBudgetNanos == 0,
+		effective_limit_nanos = p.EffectiveBudgetNanos == 0 ? (long?) null : p.EffectiveBudgetNanos,
 		costs = rt.Ledger.Summary(p.Id),
 		agents = rt.Store.ListAgents(p.Id).Count(a => AgentStates.IsLive(a.State)),
 	};

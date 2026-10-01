@@ -78,7 +78,12 @@ public static class Prompts {
 		// Coarse buckets keep the system prompt stable between turns so provider prefix caching keeps working.
 		var costs = rt.Ledger.Summary(agent.ProjectId);
 		var used = costs.BudgetNanos > 0 ? (int) (Math.Floor(100.0 * costs.EffectiveNanos / costs.BudgetNanos / 5) * 5) : 0;
-		sb.Append($"\n## Budget\nAbout {used}% of the project's {Money.Format(costs.BudgetNanos)} effective budget is spent. Use the costs tool for exact figures.\n");
+		sb.Append("\n## Budget\n");
+		sb.Append(costs.NoEffectiveLimit ? "No effective limit. Effective dollar equivalents remain tracked for accounting; they are not cash spending. "
+			: $"About {used}% of the project's {Money.Format(costs.BudgetNanos)} effective limit is spent. ");
+		sb.Append(costs.CashCeilingNanos is { } ceiling ? $"Independent cash admission ceiling: {Money.Format(ceiling)}. " : "No cash admission ceiling configured. ");
+		if(costs.CashUnknownCount > 0 || costs.ReservedCashUnknownCount > 0) sb.Append("Some cash costs are unknown, not zero. ");
+		sb.Append("Use the costs tool for exact spent, reserved and remaining amounts. Reservations are estimates, not a bank-balance guarantee.\n");
 
 		if(host is not null) {
 			var unknown = rt.Store.Db.Read(c => Dapper.SqlMapper.Query<ToolInvocation>(c, "SELECT * FROM tool_invocations WHERE session_id=@SessionId AND state='unknown' ORDER BY created_at DESC LIMIT 5", new { host.SessionId }).ToList());

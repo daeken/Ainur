@@ -453,8 +453,10 @@ public sealed class CostsTool : BuiltinTool {
 	public override Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args) {
 		var rt = ctx.Runtime;
 		var s = rt.Ledger.Summary(ctx.Project.Id);
-		var sb = new StringBuilder($"Effective: {Money.Format(s.EffectiveNanos)} spent + {Money.Format(s.ReservedEffectiveNanos)} reserved of {Money.Format(s.BudgetNanos)} budget.\n");
-		sb.Append($"Cash: {(s.CashNanos is { } c ? Money.Format(c) : $"{Money.Format(s.CashKnownNanos)} known + {s.CashUnknownCount} unknown")}{(s.CashCeilingNanos is { } cc ? $" of {Money.Format(cc)} ceiling" : "")}.\n\nBy agent (effective):\n");
+		var sb = new StringBuilder($"Effective: {Money.Format(s.EffectiveNanos)} spent + {Money.Format(s.ReservedEffectiveNanos)} reserved; {(s.NoEffectiveLimit ? "No effective limit" : $"limit {Money.Format(s.BudgetNanos)}, remaining ${s.EffectiveRemainingNanos!.Value / Money.NanosPerDollar:F6}")}.\n");
+		sb.Append($"Cash: {(s.CashNanos is { } c ? Money.Format(c) : $"{Money.Format(s.CashKnownNanos)} known + {s.CashUnknownCount} unknown")} spent + {Money.Format(s.ReservedCashNanos)} reserved{(s.ReservedCashUnknownCount > 0 ? $" + {s.ReservedCashUnknownCount} unknown reservations" : "")}; ");
+		sb.Append(s.CashCeilingNanos is { } cc ? $"admission ceiling {Money.Format(cc)}, remaining {(s.CashRemainingNanos is { } remaining ? $"${remaining / Money.NanosPerDollar:F6}" : "unknown")}.\n" : "no cash ceiling.\n");
+		sb.Append("Effective values remain accounting measures, not cash. Reservations are estimates; actual settlements may exceed admission ceilings.\n\nBy agent (effective):\n");
 		var agents = rt.Store.ListAgents(ctx.Project.Id).ToDictionary(a => a.Id);
 		foreach(var (id, v) in rt.Ledger.ByAgent(ctx.Project.Id).OrderByDescending(kv => kv.Value.Direct + kv.Value.Delegated))
 			sb.Append($"- {agents[id].Name}: direct {Money.Format(v.Direct)}, delegated {Money.Format(v.Delegated)}{(AgentStates.IsLive(agents[id].State) ? "" : $" ({agents[id].State})")}\n");
