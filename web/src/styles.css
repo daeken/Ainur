@@ -152,3 +152,5 @@ code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); 
 .new-project-form { max-width: 560px; margin: 24px; display: flex; flex-direction: column; gap: 10px; }
 .new-project-form label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }
 .row { display: flex; gap: 8px; }
+.pause-note { color: var(--warn); margin-top: 4px; }
+.consult-note { color: var(--accent); margin-top: 4px; border-left: 2px dashed var(--accent); padding-left: 6px; }

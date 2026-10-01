@@ -90,6 +90,10 @@ public static class Api {
 			return rt.Store.ListAgents(id).Select(a => new {
 				a.Id, a.Name, a.Title, a.Role, a.Lifetime, a.ManagerId, a.ModelId, a.ReasoningEffort, a.State, a.CompactionMode, a.PrimarySessionId, a.CreatedAt, a.RetiredAt,
 				status = a.PrimarySessionId is not null && hosts.TryGetValue(a.PrimarySessionId, out var h) ? h.Status : null,
+				// Consultations are temporary branches of this agent's work, not new agents.
+				consultations = rt.Store.SessionsForAgent(a.Id).Where(s => s.Kind == "consultation" && s.State != "finished")
+					.Select(s => new { s.Id, question = JsonUtil.Parse(s.Purpose)?["question"]?.GetValue<string>(), checkpoint = s.CheckpointSeq }),
+				pause = a.PrimarySessionId is null ? null : rt.ActivePause(a.PrimarySessionId) is { } pr ? new { pr.Id, pr.Scope, pr.Reason, pr.ReleaseCondition, pr.State, requester = rt.AgentLabel(pr.RequesterAgentId) } : null,
 				direct_nanos = spend.GetValueOrDefault(a.Id).Direct, delegated_nanos = spend.GetValueOrDefault(a.Id).Delegated, cash_direct_nanos = spend.GetValueOrDefault(a.Id).CashDirect,
 			});
 		});

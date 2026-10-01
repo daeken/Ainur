@@ -42,6 +42,8 @@ export interface Agent {
   direct_nanos: number
   delegated_nanos: number
   cash_direct_nanos?: number
+  consultations?: { id: string; question?: string; checkpoint?: number }[]
+  pause?: { id: string; scope: string; reason: string; release_condition: string; state: string; requester: string }
 }
 
 export interface Objective {
