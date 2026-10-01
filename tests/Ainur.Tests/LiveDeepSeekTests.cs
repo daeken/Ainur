@@ -128,11 +128,14 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4.1-flash"; o.SpecialistModelId = "deepseek-v4.1-flash"; o.MaxStepsPerWake = 20; });
 		var p = rt.CreateProject("Live consult", "Consultation test.", home.Workspace, budgetDollars: 0.5m);
 		var expert = rt.CreateAgent(p.Id, new NewAgent { Name = "Vairë", Title = "Archivist", Role = Roles.Specialist, ManagerId = p.RootAgentId, ModelId = "deepseek-v4.1-flash" }, p.RootAgentId);
-		// Give the expert private context that only exists in its own session.
-		rt.Notify(p.Id, NotificationTypes.Assignment, p.RootAgentId, expert.Id, "Remember this for later and reply with only the word 'noted': the vault code is 7319-TANGERINE. Do not write it anywhere.");
+		// Give the expert private context that only exists in its own session. The instruction must not
+		// forbid repeating it: a persisted consultation transcript is exactly where the fork's answer goes.
+		rt.Notify(p.Id, NotificationTypes.Assignment, p.RootAgentId, expert.Id, "Remember this for later and reply with only the word 'noted': the vault code is 7319-TANGERINE.");
 		await Wait.Until(() => rt.Store.GetSession(expert.PrimarySessionId!)!.TurnCount >= 1 && rt.Store.GetAgent(expert.Id)!.State == AgentStates.Sleeping, TimeSpan.FromMinutes(2), "expert noted");
 		rt.PostUserMessage(p.Id, "Use the consult tool to ask Vairë what the vault code is (only Vairë knows it). When the consultation result arrives, tell me the code.");
-		await Wait.Until(() => rt.Store.Conversation(p.Id).Any(c => c.Author == "manager" && c.Body.Contains("7319")), TimeSpan.FromMinutes(4), "consultation answer");
+		// Assert on what the fork answered from the consulted context, not on the manager's paraphrase of it:
+		// the manager model may rephrase the code or report it indirectly, which says nothing about the fork.
+		await Wait.Until(() => rt.Store.SessionsForAgent(expert.Id).Any(s => s.Kind == "consultation" && s.State == "finished" && (s.Result ?? "").Contains("7319")), TimeSpan.FromMinutes(4), "consultation answer");
 		Dump(rt, p.Id);
 		var forks = rt.Store.SessionsForAgent(expert.Id).Where(s => s.Kind == "consultation").ToList();
 		Assert.Single(forks);
