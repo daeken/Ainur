@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using Ainur.Core.Accounting;
+using Ainur.Core.Browser;
 using Ainur.Core.Context;
 using Ainur.Core.Model;
 using Ainur.Core.Persistence;
@@ -357,6 +358,10 @@ public sealed class SessionHost : IDisposable {
 
 	public void Dispose() {
 		Stop();
+		// A session owns only its own browser. Do not dispose the manager: sibling sessions in the
+		// same runtime may still be operating, and Runtime.Dispose closes the whole manager.
+		if(BrowserManager.TryFor(Runtime, out var browsers))
+			browsers!.CloseSessionAsync(SessionId).WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult();
 		Dispatcher.Post(() => Ps?.Dispose());
 		Dispatcher.Dispose();
 	}

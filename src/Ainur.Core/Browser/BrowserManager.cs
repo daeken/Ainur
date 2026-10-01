@@ -11,10 +11,12 @@ namespace Ainur.Core.Browser;
 public sealed class BrowserManager : IAsyncDisposable {
 	readonly string Home;
 	readonly ConcurrentDictionary<string, BrowserSession> Sessions = new(StringComparer.Ordinal);
+	readonly ConcurrentDictionary<string, SemaphoreSlim> SessionGates = new(StringComparer.Ordinal);
 	readonly ConcurrentDictionary<string, long> StartedAt = new(StringComparer.Ordinal);
 	readonly ConcurrentDictionary<string, string> AgentIds = new(StringComparer.Ordinal);
 	readonly CancellationTokenSource Stop = new();
 	readonly Timer Reaper;
+	int Closing;
 	static readonly ConditionalWeakTable<Runtime.AinurRuntime, BrowserManager> Instances = new();
 
 	public BrowserOptions Defaults { get; init; } = new();
@@ -28,6 +30,10 @@ public sealed class BrowserManager : IAsyncDisposable {
 	public static BrowserManager For(Runtime.AinurRuntime runtime) =>
 		Instances.GetValue(runtime, r => new BrowserManager(Path.Combine(r.Options.Home, "browser")));
 
+	/// <summary>Check for an already-created browser manager without allocating one on runtime/session disposal.</summary>
+	public static bool TryFor(Runtime.AinurRuntime runtime, out BrowserManager? manager) =>
+		Instances.TryGetValue(runtime, out manager);
+
 	/// <summary>Live stream events for the UI: "session" (opened), "frame", "closed".</summary>
 	public event Action<JsonObject>? StreamEvent;
 
@@ -35,31 +41,76 @@ public sealed class BrowserManager : IAsyncDisposable {
 	public string Root => Home;
 
 	public async Task<BrowserSession> AcquireAsync(string sessionKey, string agentId, BrowserOptions? overrides = null, CancellationToken ct = default) {
-		if(Sessions.TryGetValue(sessionKey, out var existing) && existing.IsRunning) return existing;
-		var options = (overrides ?? Defaults) with { DataRoot = Home };
-		var session = await BrowserSession.LaunchAsync(sessionKey, options, publish: null, ct).ConfigureAwait(false);
-		Sessions[sessionKey] = session;
-		var started = DateTimeOffset.UtcNow;
-		StartedAt[sessionKey] = started.ToUnixTimeMilliseconds();
-		AgentIds[sessionKey] = agentId;
-		session.Frame += frame => PublishFrame(sessionKey, agentId, session, frame);
-		session.Closed += closedKey => {
-			if(Sessions.TryRemove(closedKey, out _)) {
-				StartedAt.TryRemove(closedKey, out _);
-				AgentIds.TryRemove(closedKey, out _);
-				Emit("closed", new JsonObject { ["id"] = closedKey, ["agent_id"] = agentId, ["reason"] = "browser exited" });
+		var gate = SessionGates.GetOrAdd(sessionKey, _ => new SemaphoreSlim(1, 1));
+		await gate.WaitAsync(ct).ConfigureAwait(false);
+		try {
+			ct.ThrowIfCancellationRequested();
+			if(Volatile.Read(ref Closing) != 0) throw new ObjectDisposedException(nameof(BrowserManager));
+			if(Sessions.TryGetValue(sessionKey, out var existing)) {
+				if(existing.IsRunning) return existing;
+				await DisposeEntryAsync(sessionKey, existing, "browser exited").ConfigureAwait(false);
 			}
-		};
-		Emit("session", new JsonObject {
-			["id"] = sessionKey,
-			["agent_id"] = agentId,
-			["state"] = "streaming",
-			["url"] = "about:blank",
-			["title"] = "",
-			["viewport"] = new JsonObject { ["width"] = options.Width, ["height"] = options.Height },
-			["started_at"] = started.ToUnixTimeMilliseconds(),
-		});
-		return session;
+			var options = (overrides ?? Defaults) with { DataRoot = Home };
+			var session = await BrowserSession.LaunchAsync(sessionKey, options, publish: null, ct).ConfigureAwait(false);
+			// Runtime disposal may have started while launch awaited Chrome; never publish into a closing manager.
+			if(Volatile.Read(ref Closing) != 0) {
+				await session.DisposeAsync().ConfigureAwait(false);
+				throw new ObjectDisposedException(nameof(BrowserManager));
+			}
+			Sessions[sessionKey] = session;
+			var started = DateTimeOffset.UtcNow;
+			StartedAt[sessionKey] = started.ToUnixTimeMilliseconds();
+			AgentIds[sessionKey] = agentId;
+			session.Frame += frame => PublishFrame(sessionKey, agentId, session, frame);
+			session.Closed += _closedKey => {
+				// An old process's late Exited callback must not evict a replacement with the same key.
+				if(RemoveIfSame(sessionKey, session)) {
+					StartedAt.TryRemove(sessionKey, out _);
+					AgentIds.TryRemove(sessionKey, out _);
+					Emit("closed", new JsonObject { ["id"] = sessionKey, ["agent_id"] = agentId, ["reason"] = "browser exited" });
+				}
+			};
+			Emit("session", new JsonObject {
+				["id"] = sessionKey, ["agent_id"] = agentId, ["state"] = "streaming",
+				["url"] = "about:blank", ["title"] = "",
+				["viewport"] = new JsonObject { ["width"] = options.Width, ["height"] = options.Height },
+				["started_at"] = started.ToUnixTimeMilliseconds(),
+			});
+			return session;
+		} finally { gate.Release(); }
+	}
+
+	bool RemoveIfSame(string key, BrowserSession session) =>
+		((ICollection<KeyValuePair<string, BrowserSession>>) Sessions).Remove(new(key, session));
+
+	/// <summary>Close only this session's browser, serialized with same-key acquisition.</summary>
+	public async Task CloseSessionAsync(string sessionKey, string reason = "agent retired", CancellationToken ct = default) {
+		var gate = SessionGates.GetOrAdd(sessionKey, _ => new SemaphoreSlim(1, 1));
+		await gate.WaitAsync(ct).ConfigureAwait(false);
+		try {
+			if(Sessions.TryGetValue(sessionKey, out var session))
+				await DisposeEntryAsync(sessionKey, session, reason).ConfigureAwait(false);
+		} finally { gate.Release(); }
+	}
+
+	async Task CloseIfSameAsync(string key, BrowserSession expected, string reason) {
+		var gate = SessionGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+		await gate.WaitAsync().ConfigureAwait(false);
+		try {
+			if(Sessions.TryGetValue(key, out var current) && ReferenceEquals(expected, current))
+				await DisposeEntryAsync(key, current, reason).ConfigureAwait(false);
+		} finally { gate.Release(); }
+	}
+
+	async Task DisposeEntryAsync(string key, BrowserSession session, string reason) {
+		if(RemoveIfSame(key, session)) {
+			StartedAt.TryRemove(key, out _);
+			AgentIds.TryRemove(key, out var agentId);
+			Emit("closed", new JsonObject {
+				["id"] = key, ["agent_id"] = agentId ?? "", ["reason"] = reason,
+			});
+		}
+		await session.DisposeAsync().ConfigureAwait(false);
 	}
 
 	void PublishFrame(string sessionKey, string agentId, BrowserSession session, BrowserFrame frame) {
@@ -120,20 +171,12 @@ public sealed class BrowserManager : IAsyncDisposable {
 	}
 
 	async Task Reap() {
+		if(Volatile.Read(ref Closing) != 0) return;
 		foreach(var (key, session) in Sessions.ToList()) {
 			try {
-				if(!session.IsRunning) {
-					if(Sessions.TryRemove(key, out _)) Emit("closed", new JsonObject { ["id"] = key, ["reason"] = "browser exited" });
-					continue;
-				}
-				if(DateTimeOffset.UtcNow - session.LastUsed > session.Options.IdleTimeout) {
-					if(Sessions.TryRemove(key, out _)) {
-						StartedAt.TryRemove(key, out _);
-						AgentIds.TryRemove(key, out _);
-						Emit("closed", new JsonObject { ["id"] = key, ["reason"] = "idle timeout" });
-					}
-					await session.DisposeAsync().ConfigureAwait(false);
-				}
+				if(!session.IsRunning) await CloseIfSameAsync(key, session, "browser exited").ConfigureAwait(false);
+				else if(DateTimeOffset.UtcNow - session.LastUsed > session.Options.IdleTimeout)
+					await CloseIfSameAsync(key, session, "idle timeout").ConfigureAwait(false);
 			} catch { }
 		}
 	}
@@ -141,10 +184,16 @@ public sealed class BrowserManager : IAsyncDisposable {
 	public IReadOnlyList<BrowserSession> Active() => Sessions.Values.Where(s => s.IsRunning).ToList();
 
 	public async ValueTask DisposeAsync() {
+		if(Interlocked.Exchange(ref Closing, 1) != 0) return;
 		await Reaper.DisposeAsync().ConfigureAwait(false);
 		Stop.Cancel();
-		foreach(var session in Sessions.Values.ToList()) {
-			try { await session.DisposeAsync().ConfigureAwait(false); } catch { }
+		// Every acquisition either finished before this snapshot (and is disposed here), or sees Closing
+		// while holding its per-key gate and disposes its new browser without publishing it.
+		foreach(var key in SessionGates.Keys.ToList()) {
+			try { await CloseSessionAsync(key, "server shutdown").ConfigureAwait(false); } catch { }
+		}
+		foreach(var (key, session) in Sessions.ToList()) {
+			try { await CloseSessionAsync(key, "server shutdown").ConfigureAwait(false); } catch { }
 		}
 		Sessions.Clear();
 	}
