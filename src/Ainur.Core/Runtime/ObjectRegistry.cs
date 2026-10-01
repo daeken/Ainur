@@ -34,5 +34,12 @@ public sealed class ObjectRegistry(string sessionId, long generation) {
 		_ => value.GetType().Name,
 	};
 
-	public static bool ShouldRegister(object? value) => value is not null and not string && !value.GetType().IsPrimitive && value is not decimal;
+	/// <summary>Retain only values that carry more than their text rendering: not scalars, and not plain lists of scalars.</summary>
+	public static bool ShouldRegister(object? value) => value switch {
+		null => false,
+		string or decimal => false,
+		_ when value.GetType().IsPrimitive => false,
+		System.Collections.IEnumerable e => e.Cast<object?>().Any(x => x is not null && x is not string && !x.GetType().IsPrimitive && x is not decimal),
+		_ => true,
+	};
 }

@@ -57,6 +57,7 @@ public sealed class PowerShellHost : IDisposable {
 			sb.Append("EXCEPTION: ").Append(e.ErrorRecord?.ToString() ?? e.Message).Append('\n');
 			if(e.ErrorRecord?.InvocationInfo?.PositionMessage is { } pos) sb.Append(pos).Append('\n');
 		}
+		stopped |= ps.InvocationStateInfo.State == PSInvocationState.Stopped || timeoutCts.IsCancellationRequested;
 		foreach(var line in output) sb.Append(line?.ToString()).Append('\n');
 		foreach(var info in ps.Streams.Information) sb.Append(info.MessageData).Append('\n');
 		foreach(var w in ps.Streams.Warning) sb.Append("WARNING: ").Append(w).Append('\n');
@@ -91,10 +92,10 @@ public sealed class PowerShellHost : IDisposable {
 		ps.AddScript("""
 			function Invoke-AinurTool {
 				param([Parameter(Mandatory)][string]$Name, [object]$Arguments = @{})
-				$Ainur.Invoke($Name, $Arguments)
+				Write-Output -NoEnumerate ($Ainur.Invoke($Name, $Arguments))
 			}
 			function Get-AinurTool { $Ainur.ToolNames() }
-			function Get-AinurObject { param([Parameter(Mandatory)][string]$Handle) $Ainur.Get($Handle) }
+			function Get-AinurObject { param([Parameter(Mandatory)][string]$Handle) Write-Output -NoEnumerate ($Ainur.Get($Handle)) }
 			function Save-AinurObject { param([Parameter(Mandatory, ValueFromPipeline)][object]$Value, [string]$Summary) process { $Ainur.Put($Value, $Summary) } }
 			$ProgressPreference = 'SilentlyContinue'
 			""");
@@ -116,7 +117,8 @@ public sealed class PowerShellHost : IDisposable {
 					<# .SYNOPSIS
 					{{help}} #>
 					[CmdletBinding()] param({{string.Join(", ", parameters)}})
-					$Ainur.Invoke('{{tool.Name}}', $PSBoundParameters)
+					# Preserve the tool's exact .NET result object (collections are not unrolled).
+					Write-Output -NoEnumerate ($Ainur.Invoke('{{tool.Name}}', $PSBoundParameters))
 				}
 
 				""");
