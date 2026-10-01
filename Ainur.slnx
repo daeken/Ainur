@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Ainur.Core/Ainur.Core.csproj" />
+    <Project Path="src/Ainur.Server/Ainur.Server.csproj" />
+    <Project Path="src/Ainur.Supervisor/Ainur.Supervisor.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Ainur.Tests/Ainur.Tests.csproj" />
+  </Folder>
+</Solution>
