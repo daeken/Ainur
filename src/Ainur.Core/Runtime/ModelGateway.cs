@@ -36,6 +36,10 @@ public sealed record ModelCallResult(ProviderResponse Response, ModelRequestReco
 /// </summary>
 public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artifacts, ProviderRegistry providers, QuotaManager quotas) {
 	public async Task<ModelCallResult> CallAsync(ModelCall call, CancellationToken ct) {
+		// This is the final dispatch boundary for turns, helpers, and fallbacks. Reject persisted legacy
+		// below-floor efforts before quoting, reservations, journals, or provider side effects; explicit
+		// set_agent_model with medium/high/max is the supported repair path for such an agent.
+		var effort = AinurRuntime.ResolveReasoningEffort(call.ReasoningEffort);
 		var estimate = call.EstimatedInputTokens
 			?? call.Messages.Sum(Context.ContextBuilder.MessageTokens)
 			+ call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
@@ -48,7 +52,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			Action<StreamDelta> onDelta = d => { emitted = true; call.OnDelta?.Invoke(d); };
 			var requestId = Ids.New("req");
 			try {
-				return await AttemptAsync(call, model, requestId, estimate, onDelta, () => emitted, ct);
+				return await AttemptAsync(call, model, requestId, estimate, effort, onDelta, () => emitted, ct);
 			} catch(Exception e) {
 				var cause = FailoverClass(e);
 				if(i + 1 < chain.Count && !emitted && cause is not null) {
@@ -93,7 +97,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		return pe.Retryable ? "unavailable" : null;
 	}
 
-	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
+	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, string effort, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
 		var provider = providers.Get(model.Provider);
 		var quote = Pricing.Quote(model, estimate, call.MaxOutputTokens);
 		var record = new ModelRequestRecord {
@@ -102,7 +106,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			State = "dispatched", Quote = JsonUtil.Serialize(quote), ContextRevision = call.ContextRevision, StartedAt = Clock.Now,
 		};
 		var request = new ProviderRequest {
-			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = call.ReasoningEffort, EnableWebSearch = call.EnableWebSearch,
+			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = effort, EnableWebSearch = call.EnableWebSearch,
 		};
 		// Intent and reservation commit before dispatch so a crash leaves evidence of a possibly-billed request.
 		store.Db.Write(u => {

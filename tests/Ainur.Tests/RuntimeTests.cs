@@ -192,6 +192,9 @@ public class RuntimeTests {
 		var view = rt.CurrentView(root.PrimarySessionId!);
 		Assert.NotNull(view.SummaryItemId);
 		Assert.True(view.CutoffSeq > 0);
+		var compactCalls = provider.Requests.Where(r => r.Messages[0].Content!.StartsWith("You are the context compactor")).ToArray();
+		Assert.NotEmpty(compactCalls);
+		Assert.All(compactCalls, r => Assert.Equal("high", r.ReasoningEffort));
 		var last = provider.Requests.Last(r => !r.Messages[0].Content!.StartsWith("You are the context compactor"));
 		Assert.Contains(last.Messages, m => m.Role == "user" && m.Content!.Contains("SUMMARY: earlier work"));
 		// The newest exchanges are verbatim and every tool message follows its assistant call.

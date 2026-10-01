@@ -141,7 +141,8 @@ public sealed class Compactor(Store store, ModelGateway gateway) {
 			var result = await gateway.CallAsync(new ModelCall {
 				ProjectId = session.ProjectId, AgentId = agent.Id, SessionId = session.Id, Purpose = "compaction", Category = "compaction",
 				Model = model, Messages = [ChatMessage.System(Prompt), ChatMessage.User(user)],
-				MaxOutputTokens = policy.SummaryMaxTokens * 2, ReasoningEffort = "none",
+				// Compaction is a real model call: use the same high default as named agents.
+				MaxOutputTokens = policy.SummaryMaxTokens * 2, ReasoningEffort = AinurRuntime.DefaultReasoningEffort,
 			}, ct);
 			carried = result.Response.Content?.Trim();
 			if(string.IsNullOrWhiteSpace(carried)) throw new InvalidOperationException("Compactor returned an empty summary");

@@ -83,7 +83,8 @@ public sealed class FindToolsTool : BuiltinTool {
 						ChatMessage.System("You select tools from a registry. Reply with JSON only: {\"tools\":[names...],\"why\":\"one sentence\"}. Choose at most 4 tools that directly serve the need, best first. Choose none if nothing fits. Never invent names."),
 						ChatMessage.User($"Need: {need}\n\nCandidates:\n{listing}"),
 					],
-					MaxOutputTokens = 400, ReasoningEffort = "none",
+					// Helpers are real model calls: use the same high default as named agents.
+					MaxOutputTokens = 400, ReasoningEffort = AinurRuntime.DefaultReasoningEffort,
 				}, ctx.CancellationToken);
 				var text = r.Response.Content ?? "";
 				var json = JsonNode.Parse(text[text.IndexOf('{')..(text.LastIndexOf('}') + 1)]);
