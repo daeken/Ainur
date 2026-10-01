@@ -140,7 +140,11 @@ public class BudgetControlTests {
 		builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");
 		builder.Services.AddSingleton(rt); builder.Services.AddSingleton(new ServerOptions());
 		builder.Services.AddSingleton<EventHub>();
-		builder.Services.ConfigureHttpJsonOptions(o => { o.SerializerOptions.PropertyNamingPolicy = JsonUtil.Options.PropertyNamingPolicy; });
+		builder.Services.ConfigureHttpJsonOptions(o => {
+			o.SerializerOptions.PropertyNamingPolicy = JsonUtil.Options.PropertyNamingPolicy;
+			o.SerializerOptions.DefaultIgnoreCondition = JsonUtil.Options.DefaultIgnoreCondition;
+			foreach(var converter in JsonUtil.Options.Converters) o.SerializerOptions.Converters.Add(converter);
+		});
 		await using var app = builder.Build(); Api.Map(app); await app.StartAsync();
 		using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
 		async Task<HttpResponseMessage> Send(string method, string path, string body) => await client.SendAsync(new HttpRequestMessage(new HttpMethod(method), "/api/v1" + path) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
@@ -150,9 +154,26 @@ public class BudgetControlTests {
 		Assert.False(json["no_effective_limit"]!.GetValue<bool>());
 		Assert.Equal(Money.FromDollars(5), json["effective_limit_nanos"]!.GetValue<long>());
 		var path = "/projects/" + id;
+		async Task AssertEffectiveContract(long? limit, decimal? remaining) {
+			foreach(var (url, key) in new[] { (path, "costs"), (path + "/costs", "summary") }) {
+				var response = await client.GetAsync("/api/v1" + url); response.EnsureSuccessStatusCode();
+				var summary = JsonNode.Parse(await response.Content.ReadAsStringAsync())![key]!.AsObject();
+				Assert.True(summary.ContainsKey("effective_limit_nanos"), summary.ToJsonString());
+				Assert.True(summary.ContainsKey("effective_remaining_nanos"), summary.ToJsonString());
+				Assert.Equal(limit, summary["effective_limit_nanos"]?.GetValue<long>());
+				Assert.Equal(remaining, summary["effective_remaining_nanos"]?.GetValue<decimal>());
+			}
+		}
+		var project = rt.Store.GetProject(id)!;
+		var priced = Model();
+		var settled = Reserve(rt, project, priced);
+		rt.Db.Write(u => rt.Ledger.Settle(u, settled, Pricing.Settle(Pricing.Quote(priced, 600_000, 0), new Usage { InputTokens = 600_000 }), "direct", null));
+		Reserve(rt, project, priced);
+		await AssertEffectiveContract(Money.FromDollars(5), Money.FromDollars(3.8m));
 		(await Send("PATCH", path, """{"no_effective_limit":true,"cash_ceiling_dollars":0}""")).EnsureSuccessStatusCode();
 		(await Send("PATCH", path, """{"budget_dollars":null,"cash_ceiling_dollars":null}""")).EnsureSuccessStatusCode();
 		Assert.Equal(0, rt.Store.GetProject(id)!.EffectiveBudgetNanos); Assert.Equal(0, rt.Store.GetProject(id)!.CashCeilingNanos);
+		await AssertEffectiveContract(null, null);
 		foreach(var body in new[] {
 			"""{"budget_dollars":-1,"description":"bad"}""", """{"budget_dollars":1e100}""", """{"cash_ceiling_dollars":9223372037}""",
 			"""{"budget_dollars":"NaN"}""", """{"budget_dollars":NaN}""", """{"budget_dollars":0.0000000001}""",

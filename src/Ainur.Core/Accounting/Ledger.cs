@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Ainur.Core.Model;
 using Ainur.Core.Persistence;
 using Dapper;
@@ -17,7 +18,9 @@ public sealed class CostSummary {
 	public long BudgetNanos { get; set; }
 	public long? CashCeilingNanos { get; set; }
 	public bool NoEffectiveLimit => BudgetNanos == 0;
+	[JsonIgnore(Condition = JsonIgnoreCondition.Never)]
 	public long? EffectiveLimitNanos => NoEffectiveLimit ? null : BudgetNanos;
+	[JsonIgnore(Condition = JsonIgnoreCondition.Never)]
 	public decimal? EffectiveRemainingNanos => NoEffectiveLimit ? null : (decimal) BudgetNanos - EffectiveNanos - ReservedEffectiveNanos;
 	public decimal? CashRemainingNanos => CashCeilingNanos is { } cap && CashUnknownCount == 0 && ReservedCashUnknownCount == 0 ? (decimal) cap - CashKnownNanos - ReservedCashNanos : null;
 	public string CashRemainingStatus => CashCeilingNanos is null ? "no_ceiling" : CashUnknownCount > 0 || ReservedCashUnknownCount > 0 ? "unknown_cost" : "known";
