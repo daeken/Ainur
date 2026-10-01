@@ -2,11 +2,17 @@ export interface CostSummary {
   cash_nanos?: number
   cash_known_nanos: number
   cash_unknown_count: number
+  reserved_cash_unknown_count: number
   effective_nanos: number
   reserved_effective_nanos: number
   reserved_cash_nanos: number
   budget_nanos: number
-  cash_ceiling_nanos?: number
+  no_effective_limit: boolean
+  effective_limit_nanos: number | null
+  effective_remaining_nanos: number | null
+  cash_ceiling_nanos: number | null
+  cash_remaining_nanos: number | null
+  cash_remaining_status: 'no_ceiling' | 'unknown_cost' | 'known'
 }
 
 export interface Project {
@@ -18,7 +24,9 @@ export interface Project {
   root_objective_id?: string
   state: string
   effective_budget_nanos: number
-  cash_ceiling_nanos?: number
+  no_effective_limit: boolean
+  effective_limit_nanos: number | null
+  cash_ceiling_nanos: number | null
   created_at: number
   costs: CostSummary
   agents: number

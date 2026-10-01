@@ -8,6 +8,7 @@ import { Activity } from './Activity'
 import { AgentPanel } from './AgentPanel'
 import { NewProject } from './NewProject'
 import { Knowledge } from './Knowledge'
+import { BudgetFields, budgetPayload, initialBudgetChoice } from './BudgetFields'
 
 type Tab = 'conversation' | 'organization' | 'objectives' | 'costs' | 'activity' | 'knowledge'
 
@@ -68,7 +69,7 @@ export function App() {
         {projects.map((p) => (
           <button key={p.id} className={`project-item ${p.id === projectId ? 'active' : ''}`} onClick={() => { setProjectId(p.id); setSelectedAgent(undefined) }}>
             <span className="project-name">{p.name}</span>
-            <span className="muted small">{p.agents} agents · {dollars(p.costs.effective_nanos)}</span>
+            <span className="muted small">{p.agents} agents · {dollars(p.costs.effective_nanos)} effective</span>
           </button>
         ))}
         <button className="new-project" onClick={() => setCreating(true)}>+ New project</button>
@@ -115,20 +116,39 @@ export function App() {
 function BudgetCard({ project, onChanged }: { project: Project; onChanged: () => void }) {
   const c = project.costs
   const [editing, setEditing] = useState(false)
-  const [budget, setBudget] = useState((project.effective_budget_nanos / 1e9).toString())
-  const pct = c.budget_nanos > 0 ? Math.min(100, (100 * (c.effective_nanos + c.reserved_effective_nanos)) / c.budget_nanos) : 0
+  const [choice, setChoice] = useState(() => initialBudgetChoice(project))
+  const [error, setError] = useState<string>()
+  const capped = c.cash_ceiling_nanos != null
+  const unlimited = project.no_effective_limit || project.effective_budget_nanos === 0
+  const pct = !unlimited && c.budget_nanos > 0 ? Math.max(0, Math.min(100, (100 * (c.effective_nanos + c.reserved_effective_nanos)) / c.budget_nanos)) : null
+  const openEdit = () => { setChoice(initialBudgetChoice(project)); setError(undefined); setEditing(true) }
+  const save = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    try {
+      setError(undefined)
+      const body = budgetPayload(choice, project)
+      if (Object.keys(body).length > 0) await api.patch(`/projects/${project.id}`, body)
+      setEditing(false)
+      onChanged()
+    } catch (err) { setError((err as Error).message) }
+  }
   return (
     <div className="budget-card">
-      <div className="budget-row"><span>Effective</span><b>{dollars(c.effective_nanos)}</b><span className="muted">of {dollars(c.budget_nanos)}</span></div>
-      <div className="bar"><div style={{ width: `${pct}%` }} /></div>
-      <div className="budget-row small"><span>Cash</span><b>{c.cash_nanos !== undefined && c.cash_nanos !== null ? dollars(c.cash_nanos) : `${dollars(c.cash_known_nanos)} + ${c.cash_unknown_count} unknown`}</b>
-        {c.cash_ceiling_nanos ? <span className="muted">ceiling {dollars(c.cash_ceiling_nanos)}</span> : null}</div>
-      {c.reserved_effective_nanos > 0 && <div className="small muted">{dollars(c.reserved_effective_nanos)} reserved in flight</div>}
+      <div className="budget-row"><span>Effective reference valuation</span><b>{dollars(c.effective_nanos)}</b></div>
+      <div className="small muted">{unlimited ? 'No effective limit' : `Limit ${dollars(c.effective_limit_nanos ?? c.budget_nanos)} · remaining ${dollars(c.effective_remaining_nanos)}`}</div>
+      {pct !== null && <div className="bar" role="progressbar" aria-label="Effective reference-cost limit used" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${pct}%` }} /></div>}
+      <div className="small muted">{dollars(c.reserved_effective_nanos)} effective reserved in flight</div>
+      <div className="budget-row"><span>Cash (known)</span><b>{dollars(c.cash_known_nanos)}</b></div>
+      <div className="small muted">{c.cash_unknown_count} settled charges with unknown cash · {c.reserved_cash_unknown_count ?? 0} in-flight requests with unknown cash</div>
+      <div className="small muted">{capped ? `Cash ceiling ${dollars(c.cash_ceiling_nanos)}` : 'No cash ceiling'} · {capped && c.cash_remaining_status === 'known' ? `remaining ${dollars(c.cash_remaining_nanos)}` : capped ? 'remaining unknown (unpriced cash)' : 'no cash headroom limit'} · {dollars(c.reserved_cash_nanos)} cash reserved</div>
+      <div className="small muted">Cash charges may be actual or estimated; the ceiling controls admission from estimates, not guaranteed bank balance. Pending calls can settle above estimate.</div>
       {editing ? (
-        <form className="inline-form" onSubmit={async (e) => { e.preventDefault(); await api.patch(`/projects/${project.id}`, { budget_dollars: Number(budget) }); setEditing(false); onChanged() }}>
-          <input value={budget} onChange={(e) => setBudget(e.target.value)} size={6} /> <button>Save</button>
+        <form className="inline-form budget-edit" onSubmit={save}>
+          <BudgetFields value={choice} onChange={setChoice} />
+          {error && <div className="error">{error}</div>}
+          <div className="row"><button type="submit">Save cost controls</button><button type="button" className="link" onClick={() => setEditing(false)}>Cancel</button></div>
         </form>
-      ) : <button className="link small" onClick={() => setEditing(true)}>Change budget</button>}
+      ) : <button className="link small" onClick={openEdit}>Change cost controls</button>}
     </div>
   )
 }
