@@ -3,6 +3,8 @@ using Ainur.Core.Model;
 using Ainur.Core.Persistence;
 using Ainur.Core.Providers;
 using Ainur.Core.Runtime;
+using Ainur.Core.Tools;
+using System.Text.Json.Nodes;
 
 namespace Ainur.Tests;
 
@@ -35,6 +37,7 @@ public class AgentModelTests {
 		var change = rt.SetAgentModel(root.Id, root.Id, "gpt-6-astra", "max");
 
 		Assert.Equal("deepseek-v4.1-flash", change.PreviousModelId);
+		Assert.Equal("high", change.PreviousReasoningEffort);
 		Assert.Equal("gpt-6-astra", change.Agent.ModelId);
 		Assert.Equal("max", change.Agent.ReasoningEffort);
 		Assert.Contains(sessionBefore.Id, change.SessionsRetargeted);
@@ -105,9 +108,10 @@ public class AgentModelTests {
 		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"));
 		var p = rt.CreateProject("T", "d", home.Workspace);
 		var ex = Assert.Throws<DomainException>(() => rt.SetAgentModel(p.RootAgentId, p.RootAgentId!, null, "turbo"));
-		Assert.Contains("Unknown reasoning effort 'turbo'", ex.Message);
-		Assert.Contains("none, low, high, max", ex.Message);
-		Assert.Null(rt.Store.GetAgent(p.RootAgentId!)!.ReasoningEffort);
+		Assert.Contains("Reasoning effort 'turbo' is not allowed", ex.Message);
+		Assert.Contains("medium, high, max", ex.Message);
+		// The rejected change left the created default in place.
+		Assert.Equal("high", rt.Store.GetAgent(p.RootAgentId!)!.ReasoningEffort);
 	}
 
 	[Fact]
@@ -116,13 +120,10 @@ public class AgentModelTests {
 		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"), Prov((_, _) => FakeProvider.Text(""), "zai"));
 		var p = rt.CreateProject("T", "d", home.Workspace);
 		// glm-5.3 is an enabled zai model; zai does not transmit a reasoning-effort level (only thinking on/off).
-		var ex = Assert.Throws<DomainException>(() => rt.SetAgentModel(p.RootAgentId, p.RootAgentId!, "glm-5.3", "max"));
-		Assert.Contains("glm-5.3", ex.Message);
-		Assert.Contains("does not support reasoning effort 'max'", ex.Message);
-		// The supported value goes through.
-		var change = rt.SetAgentModel(p.RootAgentId, p.RootAgentId!, "glm-5.3", "none");
+		// Every permitted effort maps to thinking-enabled, so the platform vocabulary is accepted as-is.
+		var change = rt.SetAgentModel(p.RootAgentId, p.RootAgentId!, "glm-5.3", "medium");
 		Assert.Equal("glm-5.3", change.Agent.ModelId);
-		Assert.Equal("none", change.Agent.ReasoningEffort);
+		Assert.Equal("medium", change.Agent.ReasoningEffort);
 	}
 
 	[Fact]
@@ -145,7 +146,7 @@ public class AgentModelTests {
 		Assert.Throws<DomainException>(() => rt.SetAgentModel(specialist.Id, specialist.Id, "gpt-6-astra", null));
 		var ex = Assert.Throws<DomainException>(() => rt.SetAgentModel(specialist.Id, specialist.Id, null, "max"));
 		Assert.Contains("Only a manager", ex.Message);
-		Assert.Null(rt.Store.GetAgent(specialist.Id)!.ReasoningEffort);
+		Assert.Equal("high", rt.Store.GetAgent(specialist.Id)!.ReasoningEffort);
 		// A manager cannot reach outside its subtree either.
 		var other = rt.CreateProject("T2", "d", home.Workspace);
 		rt.CreateAgent(other.Id, new() { Name = "Far", Role = Roles.Specialist, ManagerId = other.RootAgentId }, other.RootAgentId);
@@ -159,9 +160,9 @@ public class AgentModelTests {
 		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"), Prov((_, _) => FakeProvider.Text(""), "openai"));
 		var p = rt.CreateProject("T", "d", home.Workspace);
 		var sub = rt.CreateAgent(p.Id, new() { Name = "AuleTest", Role = Roles.Specialist, ManagerId = p.RootAgentId }, p.RootAgentId);
-		var change = rt.SetAgentModel(p.RootAgentId, sub.Id, "gpt-6.1-sol", "low");
+		var change = rt.SetAgentModel(p.RootAgentId, sub.Id, "gpt-6.1-sol", "medium");
 		Assert.Equal("gpt-6.1-sol", change.Agent.ModelId);
-		Assert.Equal("low", rt.Store.GetAgent(sub.Id)!.ReasoningEffort);
+		Assert.Equal("medium", rt.Store.GetAgent(sub.Id)!.ReasoningEffort);
 	}
 
 	[Fact]
@@ -194,5 +195,145 @@ public class AgentModelTests {
 		Assert.Equal(sessionsBefore, rt.Store.SessionsForAgent(root.Id).Count);
 		Assert.Equal("gpt-6-astra", rt.Store.GetAgent(root.Id)!.ModelId);
 		Assert.Equal("gpt-6-astra", rt.Store.GetSession(primary.Id)!.ModelId);
+	}
+
+	// ------------------------------------------------------------------------------------------------
+	// Policy 2026-10-01: unspecified effort defaults to high; medium is the enforced floor.
+	// ------------------------------------------------------------------------------------------------
+
+	[Fact]
+	public void CreationDefaultsEffortToHighAndKeepsTheAgentAndSessionConsistent() {
+		using var home = new TempHome();
+		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"));
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var root = rt.Store.GetAgent(p.RootAgentId!)!;
+		Assert.Equal("high", root.ReasoningEffort);
+		var sub = rt.CreateAgent(p.Id, new() { Name = "Defaulted", Role = Roles.Specialist, ManagerId = p.RootAgentId }, p.RootAgentId);
+		Assert.Equal("high", rt.Store.GetAgent(sub.Id)!.ReasoningEffort);
+		// The persisted agent row and its primary session row agree on the model, and every primary session has one.
+		foreach(var agent in rt.Store.ListAgents(p.Id)) {
+			var sessions = rt.Store.SessionsForAgent(agent.Id).Where(s => s.Kind == "primary").ToList();
+			foreach(var s in sessions) Assert.Equal(agent.ModelId, s.ModelId);
+		}
+	}
+
+	[Theory]
+	[InlineData("medium")]
+	[InlineData("high")]
+	[InlineData("max")]
+	[InlineData("HIGH")]
+	public void AllowedEffortsAreAcceptedAtCreationAndPersisted(string effort) {
+		using var home = new TempHome();
+		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"));
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var sub = rt.CreateAgent(p.Id, new() { Name = "Allowed", Role = Roles.Specialist, ManagerId = p.RootAgentId, ReasoningEffort = effort }, p.RootAgentId);
+		Assert.Equal(effort.ToLowerInvariant(), rt.Store.GetAgent(sub.Id)!.ReasoningEffort);
+		// The create is journaled and the session created for the agent carries the same model.
+		Assert.Contains(rt.Store.Events(p.Id), e => e.Kind == "agent.created" && e.EntityId == sub.Id);
+		Assert.All(rt.Store.SessionsForAgent(sub.Id), s => Assert.Equal(sub.ModelId, s.ModelId));
+	}
+
+	[Theory]
+	[InlineData("none")]
+	[InlineData("minimal")]
+	[InlineData("low")]
+	[InlineData("turbo")]
+	public void BelowFloorEffortIsRejectedAtCreation(string effort) {
+		using var home = new TempHome();
+		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"));
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var before = rt.Store.ListAgents(p.Id).Count;
+		var ex = Assert.Throws<DomainException>(() => rt.CreateAgent(p.Id, new() { Name = "Rejected", Role = Roles.Specialist, ManagerId = p.RootAgentId, ReasoningEffort = effort }, p.RootAgentId));
+		Assert.Contains("'medium' is the platform floor", ex.Message);
+		Assert.Equal(before, rt.Store.ListAgents(p.Id).Count);
+		Assert.DoesNotContain(rt.Store.ListAgents(p.Id), a => a.Name == "Rejected");
+	}
+
+	[Theory]
+	[InlineData("none")]
+	[InlineData("minimal")]
+	[InlineData("low")]
+	public void BelowFloorEffortIsRejectedByTheChangeSurface(string effort) {
+		using var home = new TempHome();
+		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"));
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var ex = Assert.Throws<DomainException>(() => rt.SetAgentModel(p.RootAgentId, p.RootAgentId!, null, effort));
+		Assert.Contains("'medium' is the platform floor", ex.Message);
+		Assert.Equal("high", rt.Store.GetAgent(p.RootAgentId!)!.ReasoningEffort);
+	}
+
+	[Fact]
+	public void UnspecifiedEffortDispatchesAsHighWhileExplicitHighAndMaxArePreserved() {
+		using var home = new TempHome();
+		var provider = Prov((_, _) => FakeProvider.Text("done"), "deepseek");
+		using var rt = Runtime(home, provider);
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var root = rt.Store.GetAgent(p.RootAgentId!)!;
+		Assert.Equal("high", root.ReasoningEffort);
+		var high = rt.SetAgentModel(root.Id, root.Id, null, "high");
+		Assert.Equal("high", high.Agent.ReasoningEffort);
+		var max = rt.SetAgentModel(root.Id, root.Id, null, "max");
+		Assert.Equal("max", max.Agent.ReasoningEffort);
+		var medium = rt.SetAgentModel(root.Id, root.Id, null, "medium");
+		Assert.Equal("medium", medium.Agent.ReasoningEffort);
+	}
+
+	[Fact]
+	public void ModelOnlyChangeRejectsLegacyLowUntilExplicitlyRepaired() {
+		using var home = new TempHome();
+		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"), Prov((_, _) => FakeProvider.Text(""), "openai"));
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var root = rt.Store.GetAgent(p.RootAgentId!)!;
+		// Simulate a legacy row written before the floor was introduced; service must not propagate it to a new model.
+		rt.Db.Write(u => { root.ReasoningEffort = "low"; rt.Store.UpdateAgent(u, root); });
+		var ex = Assert.Throws<DomainException>(() => rt.SetAgentModel(root.Id, root.Id, "gpt-6-astra", null));
+		Assert.Contains("'medium' is the platform floor", ex.Message);
+		Assert.Equal("deepseek-v4.1-flash", rt.Store.GetAgent(root.Id)!.ModelId);
+		Assert.Equal("low", rt.Store.GetAgent(root.Id)!.ReasoningEffort);
+		var repaired = rt.SetAgentModel(root.Id, root.Id, "gpt-6-astra", "high");
+		Assert.Equal("high", repaired.Agent.ReasoningEffort);
+		Assert.Equal("gpt-6-astra", rt.Store.SessionsForAgent(root.Id).Single(s => s.Kind == "primary").ModelId);
+	}
+
+	[Fact]
+	public async Task ToolSchemasAndInvocationsHonorTheReasoningFloor() {
+		using var home = new TempHome();
+		using var rt = Runtime(home, Prov((_, _) => FakeProvider.Text(""), "deepseek"));
+		var p = rt.CreateProject("T", "d", home.Workspace);
+		var root = rt.Store.GetAgent(p.RootAgentId!)!;
+		var session = rt.Store.SessionsForAgent(root.Id).Single(s => s.Kind == "primary");
+		var ctx = new ToolContext { Runtime = rt, Agent = root, Project = p, Session = session,
+			Host = rt.GetHost(session.Id)!, InvocationId = "test", CancellationToken = CancellationToken.None };
+		var create = new CreateAgentTool();
+		var set = new SetAgentModelTool();
+		foreach(var schema in new[] { create.InputSchema, set.InputSchema }) {
+			var allowed = schema["properties"]!["reasoning_effort"]!["enum"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
+			Assert.Equal(new[] { "medium", "high", "max" }, allowed);
+		}
+		var result = await create.InvokeAsync(ctx, new JsonObject { ["name"] = "ToolCreated", ["title"] = "Tester",
+			["role"] = "specialist", ["instructions"] = "test" });
+		Assert.False(result.IsError);
+		Assert.Equal("high", rt.Store.ListAgents(p.Id).Single(a => a.Name == "ToolCreated").ReasoningEffort);
+		var error = await Assert.ThrowsAsync<ToolException>(() => set.InvokeAsync(ctx,
+			new JsonObject { ["agent"] = "me", ["reasoning_effort"] = "low" }));
+		Assert.Contains("'medium' is the platform floor", error.Message);
+		var accepted = await set.InvokeAsync(ctx, new JsonObject { ["agent"] = "me", ["reasoning_effort"] = "medium" });
+		Assert.False(accepted.IsError);
+		Assert.Equal("medium", rt.Store.GetAgent(root.Id)!.ReasoningEffort);
+	}
+
+	[Fact]
+	public void ProviderDispatchNeverDowngradesBelowTheFloor() {
+		// The floor has to survive the provider mapping: a permitted effort may be raised or passed through, but
+		// must never come out as a sub-medium level. deepseek collapses medium onto its 'high' wire value (an
+		// upgrade); openai passes it through; zai toggles thinking and transmits no level at all.
+		Assert.Equal("high", DeepSeekProvider.MapEffort("medium"));
+		Assert.Equal("medium", OpenAiResponsesProvider.MapEffort("medium"));
+		Assert.Equal("high", OpenAiResponsesProvider.MapEffort("high"));
+		foreach(var effort in AinurRuntime.AllowedReasoningEfforts) {
+			Assert.Contains(DeepSeekProvider.MapEffort(effort), new[] { "medium", "high", "max" });
+			Assert.Contains(OpenAiResponsesProvider.MapEffort(effort), new[] { "medium", "high", "max" });
+		}
+		Assert.Equal("enabled", ZaiProvider.MapEffort("medium"));
 	}
 }

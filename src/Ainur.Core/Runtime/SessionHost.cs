@@ -141,7 +141,7 @@ public sealed class SessionHost : IDisposable {
 				SponsorAgentId = Runtime.SponsorFor(session), Purpose = "turn", Category = session.Kind == "consultation" ? "consultation" : session.Kind == "service" ? "knowledge" : "direct",
 				Model = model, Messages = built.Messages, Tools = tools.Select(ToolRegistry.Spec).ToList(),
 				EnableWebSearch = model.Provider == "openai" && Runtime.Options.EnableOpenAiWebSearch,
-				MaxOutputTokens = Math.Min(model.MaxOutputTokens ?? 32_000, Runtime.Options.MaxOutputTokens), ReasoningEffort = agent.ReasoningEffort,
+				MaxOutputTokens = Math.Min(model.MaxOutputTokens ?? 32_000, Runtime.Options.MaxOutputTokens), ReasoningEffort = agent.ReasoningEffort ?? AinurRuntime.DefaultReasoningEffort,
 				EstimatedInputTokens = built.EstimatedTokens + tools.Sum(Schema.TokenEstimate), ContextRevision = built.Revision,
 				OnDelta = d => Delta?.Invoke(SessionId, d),
 				ToolBindings = tools.ToDictionary(t => t.Name, t => t.Version),
