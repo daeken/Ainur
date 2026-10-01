@@ -15,7 +15,9 @@ public sealed class FakeProvider(Func<ProviderRequest, int, ProviderResponse> ha
 		Requests.Enqueue(request);
 		var n = Interlocked.Increment(ref Count);
 		var r = handler(request, n);
-		r.Usage = r.Usage.InputTokens > 0 ? r.Usage : new Usage { InputTokens = 1000, OutputTokens = 100 };
+		// Report realistic usage so the runtime's token calibration stays near 1.
+		var input = request.Messages.Sum(Ainur.Core.Context.ContextBuilder.MessageTokens) + request.Tools.Sum(t => Ainur.Core.Tokens.Estimate(t.InputSchema.ToJsonString()) + Ainur.Core.Tokens.Estimate(t.Description) + Ainur.Core.Tokens.Estimate(t.Name) + 8);
+		r.Usage = r.Usage.InputTokens > 0 ? r.Usage : new Usage { InputTokens = input, OutputTokens = 100 };
 		r.FinishReason ??= r.ToolCalls.Count > 0 ? "tool_calls" : "stop";
 		return Task.FromResult(r);
 	}
