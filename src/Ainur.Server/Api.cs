@@ -14,9 +14,18 @@ public sealed record MessageRequest(string Text);
 public sealed record DrainRequest(int? TimeoutSeconds);
 public sealed record UpgradeOutcome(string AttemptId, string State, string ReleaseId, string? Detail);
 
+/// <summary>Read-only build/runtime identity for the GET /api/v1/version endpoint.</summary>
+public sealed record VersionInfo(string Release, long Generation, int Schema);
+
 public static class Api {
+	/// <summary>Release id (AINUR_RELEASE, defaulting to "dev"), runtime generation, and database schema version.</summary>
+	public static VersionInfo GetVersionInfo(ServerOptions options, AinurRuntime rt) =>
+		new(options.Release ?? "dev", rt.Generation, rt.Db.SchemaVersion);
+
 	public static void Map(WebApplication app) {
 		var api = app.MapGroup("/api/v1");
+
+		api.MapGet("/version", (ServerOptions options, AinurRuntime rt) => Results.Json(GetVersionInfo(options, rt)));
 
 		api.MapGet("/health", async (AinurRuntime rt) => {
 			// Readiness requires a working database and responsive session dispatchers, not merely a live process.
