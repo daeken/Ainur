@@ -24,11 +24,11 @@ These assignments are proposed defaults, not claims of benchmarked suitability o
 | --- | --- | --- |
 | Root manager | `gpt-6-astra` | `max` |
 | Subordinate, deep reasoning | `gpt-6-astra` | `high` |
-| Subordinate, raw/mechanical work | `gpt-6.1-sol` | default |
+| Subordinate, raw/mechanical work | `gpt-6-sol` | default |
 | OpenAI route unavailable | `deepseek-v4.1-flash` | — |
 
 **Model-level fallback.** Each enabled subscription row (`gpt-6`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`,
-`gpt-5.6-luna`, `gpt-6.1-sol`) carries `fallback_model_id` pointing at its `-api` twin (same upstream slug,
+`gpt-5.6-luna`, `gpt-6-sol`, `gpt-6.1-sol`) carries `fallback_model_id` pointing at its `-api` twin (same upstream slug,
 `billing=api`). `ModelGateway.CallAsync` retries the fallback only when the attempt failed without billing
 (`ProviderException.MayHaveBilled == false`) and the failure class is eligible (auth 401/403, quota 402/429, upstream
 5xx, timeout/unavailable, model-unavailable), and never after any output delta reached the caller or after a billed
@@ -57,7 +57,7 @@ before filling them in.
 
 Additional configured request keys include `openai`, targeting `gpt-5.6-sol`, and `deepseek`, targeting `deepseek-v4-pro`. The local routing policies also contain `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `gpt-reserve`, and `codex-auto-review` on subscription routes. Retain these as optional inventory requiring capability and entitlement verification, rather than assigning them ordinary project work by default.
 
-The inspected local policies do not contain `gpt-6-sol` or `gpt-6-luna`. Do not add them merely because another UI or tool list exposes those names. Likewise, the example Codex configuration's selection of `gpt-5.6-sol` is not evidence that it is the user's currently selected model.
+The inspected local **FlatlineProxy** policies do not contain `gpt-6-sol` or `gpt-6-luna`. Do not add FlatlineProxy routes merely because another UI or tool list exposes those names. This restriction does not describe the separately verified direct OpenAI subscription route below. Likewise, the example Codex configuration's selection of `gpt-5.6-sol` is not evidence that it is the user's currently selected model.
 
 Flatline requires an exact routing-policy key. A request for catalog slug `grok-4.5` or `claude-opus-4-6` therefore cannot be assumed to work through this configuration; use the existing `xai` or `anthropic` alias when invoking those models through Flatline, or configure the corresponding route explicitly. Ainur should retain the logical model identity while recording the actual alias and upstream model sent.
 
@@ -153,3 +153,21 @@ If any output delta is observed, the attempt is treated as possibly billed even
 when the provider labels its error unbilled: it settles the same conservative
 input estimate as cancellation, never releases at zero or retries elsewhere.
 This holds even when the caller does not subscribe to streaming callbacks.
+
+### Direct OpenAI Sol 6 route (2026-10-01)
+
+The exact upstream slug `gpt-6-sol` is now seeded as a direct OpenAI subscription
+worker route, distinct from `gpt-6` and `gpt-6.1-sol`. Námo's single bounded canary
+returned HTTP 200, completed model `gpt-6-sol`, `SOL6_OK`, and reported usage
+23 input / 0 cached / 7 output / 0 reasoning tokens at low effort (3,009 ms).
+There were no retries or API calls; the direct-provider canary had no gateway
+ledger, so its effective cost was not measured. This is account-availability
+proof, not a price or benchmark claim.
+
+The primary links to `gpt-6-sol-api` (same exact upstream slug, API-key route).
+Both retain null token rates; subscription settlement has zero marginal cash,
+while the unverified API route retains unknown cash cost without verified prices.
+The API twin is configuration, not an API availability claim. Historical
+`gpt-6.1-sol` rows and attribution remain unchanged; no aliases or replacements
+of historical ids were made. Delivery requires a clean runtime upgrade/reseed;
+this source change does not mutate a running catalog or switch agents itself.
