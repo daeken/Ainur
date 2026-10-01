@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 
-namespace Ainur.Supervisor;
+namespace Ainur.Releasing;
 
 public sealed class ReleaseState {
 	public string? Active { get; set; }
@@ -56,5 +56,35 @@ public sealed class Releases(string home) {
 			throw new InvalidOperationException($"{file} {string.Join(' ', args)} failed with exit code {p.ExitCode}");
 		}
 		return await stdout;
+	}
+}
+
+public sealed class UpgradeRequest {
+	public string ReleaseId { get; set; } = "";
+	public string? AttemptId { get; set; }
+	public string? RequestedBy { get; set; }
+	public string? Notes { get; set; }
+
+	static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, WriteIndented = true };
+	public static string PathFor(string home) => Path.Combine(home, "runtime", "upgrade-request.json");
+
+	public static void Write(string home, UpgradeRequest r) {
+		r.AttemptId ??= $"upg_{Guid.CreateVersion7():N}";
+		Directory.CreateDirectory(Path.Combine(home, "runtime"));
+		var tmp = PathFor(home) + ".tmp";
+		File.WriteAllText(tmp, JsonSerializer.Serialize(r, Options));
+		File.Move(tmp, PathFor(home), true);
+	}
+
+	public static UpgradeRequest? TryTake(string home) {
+		var path = PathFor(home);
+		if(!File.Exists(path)) return null;
+		try {
+			var r = JsonSerializer.Deserialize<UpgradeRequest>(File.ReadAllText(path), Options);
+			File.Delete(path);
+			return r;
+		} catch {
+			return null;
+		}
 	}
 }

@@ -13,4 +13,8 @@
     <PackageReference Include="Microsoft.PowerShell.SDK" Version="7.6.6" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="..\Shared\*.cs" LinkBase="Shared" />
+  </ItemGroup>
+
 </Project>

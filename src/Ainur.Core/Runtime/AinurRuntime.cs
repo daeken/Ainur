@@ -83,10 +83,10 @@ public sealed partial class AinurRuntime : IDisposable {
 			return gen;
 		});
 		Recover();
-		if(Options.AutoStartHosts)
-			foreach(var agent in Store.ListLiveAgents())
-				if(agent.PrimarySessionId is not null && agent.State != AgentStates.Paused)
-					Wake(agent.Id);
+		if(!Options.AutoStartHosts) return;
+		foreach(var agent in Store.ListLiveAgents())
+			if(agent.PrimarySessionId is not null && agent.State != AgentStates.Paused)
+				Wake(agent.Id);
 		foreach(var session in Store.ActiveSessions().Where(s => s.Kind != "primary"))
 			GetHost(session.Id)?.Wake();
 	}
@@ -255,7 +255,7 @@ public sealed partial class AinurRuntime : IDisposable {
 			return Prompts.ServiceTools.Contains(tool);
 		return tool switch {
 			"reply_to_user" => agent.ManagerId is null && session.Kind == "primary",
-			"create_agent" or "retire_agent" or "reassign_agent" or "assign_work" or "pause_agent" or "resume_agent" => agent.Role == Roles.Manager,
+			"create_agent" or "retire_agent" or "reassign_agent" or "assign_work" or "pause_agent" or "resume_agent" or "activate_release" => agent.Role == Roles.Manager,
 			_ => true,
 		};
 	}

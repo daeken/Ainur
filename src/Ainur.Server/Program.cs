@@ -3,7 +3,8 @@ using Ainur.Core.Runtime;
 using Ainur.Server;
 
 var options = ServerOptions.FromArgs(args);
-var runtimeOptions = new RuntimeOptions { Home = options.Home };
+// Validation instances run against disposable copies of live state and must not resume agent work on their own.
+var runtimeOptions = new RuntimeOptions { Home = options.Home, AutoStartHosts = Environment.GetEnvironmentVariable("AINUR_VALIDATION") != "1" };
 
 // Exactly one scheduler may dispatch work against a home directory at a time.
 using var schedulerLock = SchedulerLock.TryAcquire(Path.Combine(options.Home, "runtime", "scheduler.lock"));

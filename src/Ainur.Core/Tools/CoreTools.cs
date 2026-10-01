@@ -18,6 +18,7 @@ public static class BuiltinTools {
 			new ReadIdentityTool(), new WriteIdentityTool(), new CostsTool(),
 			new KnowledgeSearchTool(), new KnowledgeReadTool(), new KnowledgeWriteTool(), new AskKnowledgeTool(),
 			new RegisterToolTool(), new ListObjectsTool(),
+			new BuildReleaseTool(), new ValidateReleaseTool(), new ActivateReleaseTool(), new ReleaseStatusTool(),
 		];
 		foreach(var tool in tools) rt.Tools.Register(tool);
 	}
