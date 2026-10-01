@@ -261,6 +261,10 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 				["strict"] = false,
 			}).ToArray());
 		}
+		if(request.EnableWebSearch) {
+			if(body["tools"] is not JsonArray) body["tools"] = new JsonArray();
+			((JsonArray) body["tools"]!).Add(new JsonObject { ["type"] = "web_search" });
+		}
 		return body;
 	}
 
@@ -368,8 +372,21 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 							RegisterItem(added, root, byItemId, calls);
 						break;
 					case "response.output_item.done":
-						if(root.TryGetProperty("item", out var done) && done.ValueKind == JsonValueKind.Object)
+						if(root.TryGetProperty("item", out var done) && done.ValueKind == JsonValueKind.Object) {
 							RegisterItem(done, root, byItemId, calls);
+							if(done.TryGetProperty("type", out var itemType) && itemType.GetString() == "web_search_call")
+								result.WebSearchCalls.Add((JsonObject) JsonNode.Parse(done.GetRawText())!);
+						}
+						break;
+					case "response.output_text.annotation.added":
+						if(root.TryGetProperty("annotation", out var annotation) && annotation.ValueKind == JsonValueKind.Object)
+							result.Annotations.Add((JsonObject) JsonNode.Parse(annotation.GetRawText())!);
+						break;
+					case "response.web_search_call.in_progress":
+					case "response.web_search_call.searching":
+					case "response.web_search_call.completed":
+						// Server-side tool work can incur input usage even before a text delta.
+						emittedOutput = true;
 						break;
 					case "response.created":
 						if(root.TryGetProperty("response", out var created) && created.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String)

@@ -31,6 +31,8 @@ public sealed class ProviderRequest {
 	public int MaxOutputTokens { get; init; } = 8192;
 	public string? ReasoningEffort { get; init; }
 	public string? ToolChoice { get; init; }
+	/// <summary>Opt in to native OpenAI web search; retrieved pages count toward reported input usage.</summary>
+	public bool EnableWebSearch { get; init; }
 }
 
 public sealed class Usage {
@@ -48,6 +50,8 @@ public sealed class ProviderResponse {
 	public string? FinishReason { get; set; }
 	public Usage Usage { get; set; } = new();
 	public string? UpstreamModel { get; set; }
+	public List<JsonObject> WebSearchCalls { get; set; } = [];
+	public List<JsonObject> Annotations { get; set; } = [];
 	public string RawRequest { get; set; } = "";
 	public string RawResponse { get; set; } = "";
 }

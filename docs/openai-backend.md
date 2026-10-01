@@ -65,3 +65,27 @@ See `docs/model-catalog.md` for the fallback semantics and the owner's route-ass
   so the API route is covered by scripted-HTTP unit tests only, not a live call. (The owner's platform key currently
   returns `insufficient_quota` 429 on `api.openai.com` — the 62,500 credits are subscription-continuation credits, not
   platform API credits — so the subscription route remains primary.)
+
+## Native web search (opt-in)
+
+Set `ProviderRequest.EnableWebSearch = true` (or `ModelCall.EnableWebSearch = true`
+through the accounting gateway) to append exactly `{"type":"web_search"}` to the
+Responses tools array, alongside ordinary function tools. It is off by default.
+For agent turns, hosts can set `RuntimeOptions.EnableOpenAiWebSearch = true`; only
+OpenAI sessions receive this capability, not compaction or background calls.
+The model chooses whether to search; no local function invocation is dispatched.
+
+`ProviderResponse.WebSearchCalls` preserves completed native search items, including
+`action.query`, `action.queries`, or `action.url` when supplied upstream.
+`ProviderResponse.Annotations` preserves text annotation events, including URL
+citation titles, URLs and text offsets. These are caller-facing metadata; the
+current agent transcript retains the model text, not a separate citation UI.
+Full events also remain in `RawResponse` (and the gateway response artifact).
+
+Retrieved pages count as **input tokens**. A trivial live endpoint probe reported
+12,810 input tokens (4,096 cached), not merely the prompt's length. The provider
+passes full reported usage to the gateway, whose settlement uses that usage rather
+than the preflight estimate. Preflight reservations cannot predict retrieved-page
+size and are not a hard cap on final usage. No invented per-search fee is added;
+API rows without verified prices continue to have unknown cash cost. Native search
+status events and items are not function calls and never request local execution.

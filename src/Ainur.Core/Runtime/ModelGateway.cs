@@ -18,6 +18,7 @@ public sealed class ModelCall {
 	public List<ToolSpec> Tools { get; init; } = [];
 	public int MaxOutputTokens { get; init; } = 8192;
 	public string? ReasoningEffort { get; init; }
+	public bool EnableWebSearch { get; init; }
 	public int? EstimatedInputTokens { get; init; }
 	public int? ContextRevision { get; init; }
 	public Action<StreamDelta>? OnDelta { get; init; }
@@ -100,7 +101,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			State = "dispatched", Quote = JsonUtil.Serialize(quote), ContextRevision = call.ContextRevision, StartedAt = Clock.Now,
 		};
 		var request = new ProviderRequest {
-			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = call.ReasoningEffort,
+			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = call.ReasoningEffort, EnableWebSearch = call.EnableWebSearch,
 		};
 		// Intent and reservation commit before dispatch so a crash leaves evidence of a possibly-billed request.
 		store.Db.Write(u => {

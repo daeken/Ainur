@@ -23,6 +23,8 @@ public sealed class RuntimeOptions {
 	/// <summary>Optional per-session override, e.g. to give a test session a tiny window.</summary>
 	public Func<Agent, Session, ContextPolicy?>? PolicyOverride { get; set; }
 	public bool AutoStartHosts { get; set; } = true;
+	/// <summary>Opt in agent turns on OpenAI models to native web search (additional input-token usage).</summary>
+	public bool EnableOpenAiWebSearch { get; set; }
 
 	public static string DefaultHome() => Environment.GetEnvironmentVariable("AINUR_HOME") is { Length: > 0 } h ? h
 		: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ainur");

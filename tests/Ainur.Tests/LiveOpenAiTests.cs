@@ -20,6 +20,23 @@ public class LiveOpenAiTests(ITestOutputHelper output) {
 	static readonly bool HasSubscription = File.Exists(AuthPath());
 
 	[SkippableFact]
+	public async Task SubscriptionWebSearchSmokeTest() {
+		Skip.IfNot(HasSubscription, "no Codex credential file");
+		using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+		var provider = new OpenAiResponsesProvider(new HttpClient { Timeout = TimeSpan.FromMinutes(2) }, routeOverride: "subscription");
+		var r = await provider.CompleteAsync(new ProviderRequest {
+			Model = new ModelInfo { Id = "gpt-6-astra", Provider = "openai", UpstreamModel = "gpt-6-astra", Billing = "subscription", Enabled = true },
+			Messages = [ChatMessage.System("Use web search once. Reply briefly with a cited source."), ChatMessage.User("Search the web for the IANA example domains documentation and give its title and URL.")],
+			ReasoningEffort = "low", EnableWebSearch = true,
+		}, null, timeout.Token);
+		output.WriteLine($"search_calls={r.WebSearchCalls.Count} annotations={r.Annotations.Count} usage={JsonUtil.Serialize(r.Usage)}");
+		Assert.NotEmpty(r.WebSearchCalls);
+		Assert.False(string.IsNullOrWhiteSpace(r.Content));
+		Assert.True(r.Usage.Reported);
+		Assert.True(r.Usage.InputTokens > 0);
+	}
+
+	[SkippableFact]
 	public async Task SubscriptionSmokeTest() {
 		Skip.IfNot(HasSubscription, "no Codex credential file");
 		var provider = new OpenAiResponsesProvider(new HttpClient { Timeout = TimeSpan.FromMinutes(30) }, routeOverride: "subscription");
