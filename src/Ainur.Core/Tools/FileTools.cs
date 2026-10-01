@@ -80,8 +80,8 @@ public static class MultiEdit {
 		var lines = text.Split('\n');
 		var needleLines = needle.Split('\n').Select(Norm).Where(l => l.Length > 0).ToArray();
 		if(needleLines.Length == 0) return "";
-		var normText = Norm(text);
-		if(normText.Contains(string.Join(" ", needle.Split('\n').Select(Norm).Where(l => l.Length > 0)).Trim(), StringComparison.Ordinal) && needleLines.Length > 0) {
+		static string Flat(string s) => Regex.Replace(s, @"\s+", " ").Trim();
+		if(Flat(text).Contains(Flat(needle), StringComparison.Ordinal)) {
 			for(var i = 0; i < lines.Length; i++)
 				if(Norm(lines[i]) == needleLines[0])
 					return $" (a whitespace-insensitive match starts at line {i + 1}; check indentation and spacing)";
