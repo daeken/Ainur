@@ -17,6 +17,7 @@ public sealed class PowerShellHost : IDisposable {
 	Runspace? Runspace;
 	string? FunctionStamp;
 	int Depth;
+	static readonly Lock OpenGate = new();
 
 	public PowerShellHost(SessionHost host) => Host = host;
 
@@ -84,7 +85,9 @@ public sealed class PowerShellHost : IDisposable {
 		Runspace = RunspaceFactory.CreateRunspace(iss);
 		// Run pipelines on the caller (the session dispatcher) so object ownership stays with the session thread.
 		Runspace.ThreadOptions = PSThreadOptions.UseCurrentThread;
-		Runspace.Open();
+		// Opening a runspace enumerates mount points (getmntinfo), which is not thread-safe on macOS; concurrent opens
+		// across sessions can crash the process, so opens are serialized.
+		lock(OpenGate) Runspace.Open();
 		Runspace.SessionStateProxy.SetVariable("Ainur", new Bridge(Host));
 		Runspace.SessionStateProxy.Path.SetLocation(WildcardPattern.Escape(Host.Workspace));
 		using var ps = PowerShell.Create();
