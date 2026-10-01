@@ -11,7 +11,9 @@ interface CostData {
 export function Costs({ project, agents, tick }: { project: Project; agents: Agent[]; tick: number }) {
   const [data, setData] = useState<CostData>()
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [quotas, setQuotas] = useState<any[]>([])
   useEffect(() => { api.get<CostData>(`/projects/${project.id}/costs`).then(setData).catch(console.error) }, [project.id, tick])
+  useEffect(() => { api.get<any[]>('/quotas').then(setQuotas).catch(console.error) }, [tick])
   useEffect(() => { api.get<ModelInfo[]>('/models').then(setModels).catch(console.error) }, [])
   if (!data) return null
   const name = (id?: string) => agents.find((a) => a.id === id)?.name ?? '—'
@@ -41,6 +43,13 @@ export function Costs({ project, agents, tick }: { project: Project; agents: Age
           <tr key={e.id}><td>{ago(e.created_at)}</td><td>{name(e.agent_id)}</td><td>{e.category}</td><td>{dollars(e.effective_nanos)}</td><td>{dollars(e.cash_nanos)}</td><td>{e.cash_basis}</td><td className="small muted">{e.valuation}</td></tr>
         ))}</tbody>
       </table>
+      {quotas.length > 0 && <>
+        <h3>Subscription quota windows (account-wide, all projects)</h3>
+        <table>
+          <thead><tr><th>Window</th><th>Provider</th><th>Committed</th><th>Held</th><th>Capacity</th><th>Headroom</th><th>Window value</th><th>Resets</th></tr></thead>
+          <tbody>{quotas.map((q) => <tr key={q.id}><td className="mono">{q.id}</td><td>{q.provider}</td><td>{q.committed.toLocaleString()} {q.unit}</td><td>{q.held.toLocaleString()}</td><td>{q.capacity.toLocaleString()}</td><td>{(q.headroom * 100).toFixed(0)}%</td><td>${q.window_value_dollars}</td><td>{new Date(q.resets_at).toLocaleString()}</td></tr>)}</tbody>
+        </table>
+      </>}
       <h3>Model catalog</h3>
       <table>
         <thead><tr><th>Model</th><th>Provider</th><th>Input</th><th>Cached</th><th>Output</th><th>Billing</th><th>Status</th></tr></thead>

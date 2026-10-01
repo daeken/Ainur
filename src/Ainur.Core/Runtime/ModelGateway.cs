@@ -30,7 +30,7 @@ public sealed record ModelCallResult(ProviderResponse Response, ModelRequestReco
 /// The single path for model requests: quote, atomically reserve budget, record intent, dispatch, then settle
 /// usage into exactly one cost event. Failures release or conservatively retain reservations.
 /// </summary>
-public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artifacts, ProviderRegistry providers) {
+public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artifacts, ProviderRegistry providers, QuotaManager quotas) {
 	public async Task<ModelCallResult> CallAsync(ModelCall call, CancellationToken ct) {
 		var provider = providers.Get(call.Model.Provider);
 		var estimate = call.EstimatedInputTokens ?? call.Messages.Sum(Context.ContextBuilder.MessageTokens) + call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
@@ -48,6 +48,15 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			store.InsertModelRequest(u, record);
 			if(call.ToolBindings is not null)
 				u.Execute("UPDATE model_requests SET tool_bindings=@b WHERE id=@Id", new { b = JsonUtil.Serialize(call.ToolBindings), record.Id });
+			// Quota holds are taken in every applicable window together with the dollar reservation.
+			var holds = quotas.Reserve(u, call.Model, record.Id, estimate, call.MaxOutputTokens);
+			if(holds.Count > 0) {
+				quote.ScarcityFloor = Math.Max(quote.ScarcityFloor, holds.Max(h => h.Scarcity));
+				quote.ReservedEffectiveNanos = Math.Max(quote.ReservedEffectiveNanos,
+					holds.Max(h => Money.FromDollars((decimal) h.Units / Math.Max(1, h.Window.Capacity) * h.Window.WindowValueDollars * h.Scarcity)));
+				record.Quote = JsonUtil.Serialize(quote);
+				u.Execute("UPDATE model_requests SET quote=@Quote WHERE id=@Id", record);
+			}
 			ledger.Reserve(u, call.ProjectId, record.Id, quote);
 			u.Journal("model.dispatched", call.ProjectId, "model_request", record.Id, call.AgentId, new { call.Purpose, model = call.Model.Id, estimate, reserved_effective = quote.ReservedEffectiveNanos });
 		});
@@ -64,10 +73,13 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 				store.UpdateModelRequest(u, record);
 				if(mayHaveBilled) {
 					// Usage is uncertain: charge a conservative estimate (input only) rather than zero or the full reservation.
-					var charge = Pricing.Settle(quote, new Usage { InputTokens = estimate, Reported = false });
+					var uncertain = new Usage { InputTokens = estimate, Reported = false };
+					var charge = Pricing.Settle(quote, uncertain, quotas.Commit(u, record.Id, uncertain));
 					ledger.Settle(u, record, charge with { CashBasis = charge.CashBasis == "unknown" ? "unknown" : "estimated" }, call.Category, call.SponsorAgentId);
-				} else
+				} else {
 					ledger.Release(u, record.Id);
+					quotas.Release(u, record.Id);
+				}
 				u.Journal("model.failed", call.ProjectId, "model_request", record.Id, call.AgentId, new { error = TextUtil.Truncate(e.Message, 500), uncertain = mayHaveBilled });
 			});
 			throw;
@@ -84,7 +96,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			u.Execute("UPDATE model_requests SET request_artifact=@requestArtifact WHERE id=@Id", new { requestArtifact, record.Id });
 			store.UpdateModelRequest(u, record);
 			var usage = response.Usage.Reported ? response.Usage : new Usage { InputTokens = estimate, OutputTokens = Tokens.Estimate(response.Content) + Tokens.Estimate(response.Reasoning), Reported = false };
-			cost = ledger.Settle(u, record, Pricing.Settle(quote, usage), call.Category, call.SponsorAgentId);
+			cost = ledger.Settle(u, record, Pricing.Settle(quote, usage, quotas.Commit(u, record.Id, usage)), call.Category, call.SponsorAgentId);
 			u.Journal("model.completed", call.ProjectId, "model_request", record.Id, call.AgentId, new {
 				call.Purpose, model = call.Model.Id, usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens, response.FinishReason,
 				tool_calls = response.ToolCalls.Count, effective_nanos = cost?.EffectiveNanos, cash_nanos = cost?.CashNanos,

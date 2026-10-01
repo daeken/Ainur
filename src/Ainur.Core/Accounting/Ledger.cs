@@ -4,7 +4,7 @@ using Dapper;
 
 namespace Ainur.Core.Accounting;
 
-public sealed class BudgetExhaustedException(string message) : DomainException(message);
+public class BudgetExhaustedException(string message) : DomainException(message);
 
 public sealed class CostSummary {
 	public long? CashNanos { get; set; }

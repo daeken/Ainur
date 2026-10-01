@@ -364,5 +364,20 @@ public static class Migrations {
 			-- Exact tool name → version bindings declared to the model for each request; returned calls resolve against them.
 			ALTER TABLE model_requests ADD COLUMN tool_bindings TEXT;
 			"""),
+		(5, "quota_usage", """
+			-- Account-wide subscription quota consumption per window cycle, shared across projects.
+			CREATE TABLE quota_usage (
+				id TEXT PRIMARY KEY,
+				window_id TEXT NOT NULL,
+				cycle_start INTEGER NOT NULL,
+				model_request_id TEXT NOT NULL,
+				units INTEGER NOT NULL,
+				scarcity TEXT NOT NULL DEFAULT '1', -- frozen at quote time
+				state TEXT NOT NULL,             -- held | committed | released
+				created_at INTEGER NOT NULL
+			);
+			CREATE INDEX quota_usage_window ON quota_usage(window_id, cycle_start, state);
+			CREATE INDEX quota_usage_request ON quota_usage(model_request_id);
+			"""),
 	];
 }

@@ -40,6 +40,7 @@ public sealed partial class AinurRuntime : IDisposable {
 	public readonly ArtifactStore Artifacts;
 	public readonly ProviderRegistry Providers;
 	public readonly ModelGateway Gateway;
+	public readonly QuotaManager Quotas;
 	public readonly ToolRegistry Tools;
 	public readonly Compactor Compactor;
 	public readonly Watchdog Watchdog;
@@ -57,7 +58,8 @@ public sealed partial class AinurRuntime : IDisposable {
 		Ledger = new Ledger(Store);
 		Artifacts = new ArtifactStore(Path.Combine(options.Home, "artifacts"));
 		Providers = providers ?? DefaultProviders();
-		Gateway = new ModelGateway(Store, Ledger, Artifacts, Providers);
+		Quotas = new QuotaManager(options.Home);
+		Gateway = new ModelGateway(Store, Ledger, Artifacts, Providers, Quotas);
 		Tools = new ToolRegistry(Store);
 		Compactor = new Compactor(Store, Gateway);
 		Watchdog = new Watchdog(Path.Combine(options.Home, "runtime", "inflight.json"));
@@ -138,7 +140,8 @@ public sealed partial class AinurRuntime : IDisposable {
 				req.FinishedAt = Clock.Now;
 				Store.UpdateModelRequest(u, req);
 				var quote = JsonUtil.Deserialize<Quote>(req.Quote)!;
-				var charge = Pricing.Settle(quote, new Usage { InputTokens = quote.EstimatedInputTokens, Reported = false });
+				var uncertain = new Usage { InputTokens = quote.EstimatedInputTokens, Reported = false };
+				var charge = Pricing.Settle(quote, uncertain, Quotas.Commit(u, req.Id, uncertain));
 				Ledger.Settle(u, req, charge with { CashBasis = charge.CashNanos is null ? "unknown" : "estimated" }, req.Purpose == "turn" ? "direct" : req.Purpose, null);
 				u.Journal("model.reconciled", req.ProjectId, "model_request", req.Id, req.AgentId, new { state = "unknown" });
 			});

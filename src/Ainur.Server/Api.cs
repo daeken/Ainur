@@ -54,6 +54,8 @@ public static class Api {
 			m.PriceProvenance, m.Billing, m.Enabled, usable = m.Enabled && rt.Providers.Has(m.Provider), m.Notes,
 		}));
 
+		api.MapGet("/quotas", (AinurRuntime rt) => rt.Quotas.Status(rt.Db));
+
 		api.MapGet("/projects", (AinurRuntime rt) => rt.Store.ListProjects().Select(p => ProjectView(rt, p)));
 
 		api.MapPost("/projects", (AinurRuntime rt, CreateProjectRequest req) => {
