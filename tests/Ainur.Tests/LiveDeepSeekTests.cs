@@ -120,4 +120,70 @@ public class LiveDeepSeekTests(ITestOutputHelper output) {
 		Dump(rt, p.Id);
 		Assert.Contains("dune", rt.Store.Conversation(p.Id).Last(c => c.Author == "manager").Body.ToLowerInvariant());
 	}
+
+	[SkippableFact]
+	public async Task ConsultationForkAnswersFromConsultedContext() {
+		Skip.IfNot(HasKey, "no DeepSeek credential");
+		using var home = new TempHome();
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.SpecialistModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 20; });
+		var p = rt.CreateProject("Live consult", "Consultation test.", home.Workspace, budgetDollars: 0.5m);
+		var expert = rt.CreateAgent(p.Id, new NewAgent { Name = "Vairë", Title = "Archivist", Role = Roles.Specialist, ManagerId = p.RootAgentId, ModelId = "deepseek-v4-flash" }, p.RootAgentId);
+		// Give the expert private context that only exists in its own session.
+		rt.Notify(p.Id, NotificationTypes.Assignment, p.RootAgentId, expert.Id, "Remember this for later and reply with only the word 'noted': the vault code is 7319-TANGERINE. Do not write it anywhere.");
+		await Wait.Until(() => rt.Store.GetSession(expert.PrimarySessionId!)!.TurnCount >= 1 && rt.Store.GetAgent(expert.Id)!.State == AgentStates.Sleeping, TimeSpan.FromMinutes(2), "expert noted");
+		rt.PostUserMessage(p.Id, "Use the consult tool to ask Vairë what the vault code is (only Vairë knows it). When the consultation result arrives, tell me the code.");
+		await Wait.Until(() => rt.Store.Conversation(p.Id).Any(c => c.Author == "manager" && c.Body.Contains("7319")), TimeSpan.FromMinutes(4), "consultation answer");
+		Dump(rt, p.Id);
+		var forks = rt.Store.SessionsForAgent(expert.Id).Where(s => s.Kind == "consultation").ToList();
+		Assert.Single(forks);
+		Assert.Equal("finished", forks[0].State);
+		Assert.Equal(expert.PrimarySessionId, forks[0].ParentSessionId);
+		// The original session received a background record, and the fork's costs are attributed as consultation spend.
+		Assert.Contains(rt.Store.ListNotifications(p.Id), n => n.Type == NotificationTypes.Decision && n.ToAgentId == expert.Id);
+		Assert.Contains(rt.Store.CostEvents(p.Id), c => c.Category == "consultation" && c.SponsorAgentId == p.RootAgentId && c.AgentId == expert.Id);
+	}
+
+	[SkippableFact]
+	public async Task KnowledgeServiceAnswersWithReferences() {
+		Skip.IfNot(HasKey, "no DeepSeek credential");
+		using var home = new TempHome();
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 20; });
+		var p = rt.CreateProject("Live knowledge", "Knowledge test.", home.Workspace, budgetDollars: 0.5m);
+		Knowledge.Write(rt.Store, p.Id, "decisions/database", "Database choice", "decision", "We use SQLite in WAL mode for local persistence. Postgres was rejected for the bootstrap because it adds an external service.", p.RootAgentId, "design review 2026-09-30", null, null);
+		Knowledge.Write(rt.Store, p.Id, "requirements/ui", "UI stack", "requirement", "The UI must be React with TypeScript, built by Vite.", p.RootAgentId, "spec", null, null);
+		rt.PostUserMessage(p.Id, "Use ask_knowledge to find out which database we chose and why. When the result arrives, tell me the answer and the document key it came from.");
+		await Wait.Until(() => rt.Store.Conversation(p.Id).Any(c => c.Author == "manager" && c.Body.Contains("SQLite")), TimeSpan.FromMinutes(4), "knowledge answer");
+		Dump(rt, p.Id);
+		var service = rt.Store.SessionsForAgent(p.RootAgentId!).Single(s => s.Kind == "service");
+		Assert.Equal("finished", service.State);
+		Assert.Contains("decisions/database", service.Result);
+		Assert.Contains(rt.Store.CostEvents(p.Id), c => c.Category == "knowledge");
+	}
+
+	[SkippableFact]
+	public async Task ToolFinderLoadsAndCacheEvictsWithinBudget() {
+		Skip.IfNot(HasKey, "no DeepSeek credential");
+		using var home = new TempHome();
+		var policy = new ContextPolicy { ToolTokenBudget = 4_500 };
+		using var rt = home.Runtime(configure: o => { o.ManagerModelId = "deepseek-v4-flash"; o.MaxStepsPerWake = 25; o.PolicyOverride = (_, _) => policy; });
+		// A large inventory of plausible tools the agent has never seen.
+		for(var i = 0; i < 120; i++)
+			rt.Tools.Register(new ScriptTool($"inventory_tool_{i:000}", $"Inventory helper number {i} for warehouse bin {i * 7} counting and stock audits.", Schema.Object(("bin", Schema.String("Bin id"), false)), "param($bin) 'ok'", ["inventory", "warehouse"], TimeSpan.FromSeconds(10)));
+		rt.Tools.Register(new ScriptTool("convert_temperature", "Convert a temperature between Celsius and Fahrenheit.", Schema.Object(("value", Schema.Number("Temperature"), true), ("to", Schema.String("Target unit: C or F", "C", "F"), true)),
+			"param([double]$value, [string]$to) if($to -eq 'F') { '{0:0.0} F' -f ($value * 9 / 5 + 32) } else { '{0:0.0} C' -f (($value - 32) * 5 / 9) }", ["temperature", "convert", "units"], TimeSpan.FromSeconds(10)));
+		var p = rt.CreateProject("Live tools", "Tool finder test.", home.Workspace, budgetDollars: 0.5m);
+		rt.PostUserMessage(p.Id, "Use find_tools to find a tool that converts temperatures, then call that tool directly (not via powershell) to convert 100 C to Fahrenheit. Reply with the result only.");
+		await Wait.Until(() => rt.Store.Conversation(p.Id).Any(c => c.Author == "manager"), TimeSpan.FromMinutes(4), "converted");
+		Dump(rt, p.Id);
+		Assert.Contains("212", rt.Store.Conversation(p.Id).Last().Body);
+		var root = rt.Store.GetAgent(p.RootAgentId!)!;
+		var cache = new ToolCache(rt.Store, rt.Tools, root.PrimarySessionId!);
+		Assert.True(cache.RenderedTokens() <= policy.ToolTokenBudget + 2_000, $"tool tokens {cache.RenderedTokens()}");
+		var calls = rt.Store.Events(p.Id).Where(e => e.Kind == "tool.finished").Select(e => JsonNode.Parse(e.Payload)!["tool_name"]!.GetValue<string>()).ToList();
+		Assert.Contains("find_tools", calls);
+		Assert.Contains("convert_temperature", calls);
+		Assert.Contains(rt.Store.CostEvents(p.Id), c => c.Category == "tool_finder");
+		// Never loaded the full inventory into context.
+		Assert.True(cache.Entries().Count(e => e.Name.StartsWith("inventory_tool")) <= 4);
+	}
 }
