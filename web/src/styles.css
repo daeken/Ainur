@@ -65,7 +65,17 @@ code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); 
 .main { display: flex; flex-direction: column; min-width: 0; height: 100%; overflow: hidden; }
 .project-header { display: flex; justify-content: space-between; gap: 16px; padding: 16px 20px 8px; }
 .project-header h1 { margin: 0 0 2px; font-size: 22px; }
-.budget-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 260px; }
+.budget-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 295px; max-width: 450px; }
+.budget-card .small { margin-top: 3px; }
+.budget-fields { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 12px 0; }
+.budget-fields legend { font-weight: 600; }
+.budget-choice { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; }
+.budget-choice label { display: flex; gap: 6px; align-items: center; }
+.budget-choice input[type="radio"] { width: auto; flex: none; }
+.budget-choice label:has(input[type="number"]) { flex-wrap: wrap; }
+.budget-choice input[type="number"] { max-width: 170px; }
+.budget-edit { flex-direction: column; align-items: stretch; }
+.budget-edit .row { display: flex; gap: 8px; }
 .budget-row { display: flex; gap: 8px; align-items: baseline; }
 .bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; margin: 6px 0; }
 .bar > div { height: 100%; background: var(--accent); }

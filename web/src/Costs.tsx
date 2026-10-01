@@ -21,8 +21,8 @@ export function Costs({ project, agents, tick }: { project: Project; agents: Age
   return (
     <div className="costs">
       <div className="cards">
-        <div className="card"><div className="muted small">Effective budget charge</div><div className="big">{dollars(s.effective_nanos)}</div><div className="small muted">of {dollars(s.budget_nanos)} · {dollars(s.reserved_effective_nanos)} reserved</div></div>
-        <div className="card"><div className="muted small">Cash expense (actual or estimated)</div><div className="big">{s.cash_nanos != null ? dollars(s.cash_nanos) : dollars(s.cash_known_nanos)}</div><div className="small muted">{s.cash_unknown_count > 0 ? `${s.cash_unknown_count} charges with unknown cash` : 'all charges priced'}{s.cash_ceiling_nanos ? ` · ceiling ${dollars(s.cash_ceiling_nanos)}` : ''}</div></div>
+        <div className="card"><div className="muted small">Effective reference valuation (not cash)</div><div className="big">{dollars(s.effective_nanos)}</div><div className="small muted">{s.no_effective_limit || s.budget_nanos === 0 ? 'No effective limit' : `limit ${dollars(s.effective_limit_nanos ?? s.budget_nanos)} · remaining ${dollars(s.effective_remaining_nanos)}`} · {dollars(s.reserved_effective_nanos)} reserved</div></div>
+        <div className="card"><div className="muted small">Known cash expense (actual or estimated)</div><div className="big">{dollars(s.cash_known_nanos)}</div><div className="small muted">{s.cash_unknown_count} settled charges with unknown cash · {s.reserved_cash_unknown_count ?? 0} unknown in flight</div><div className="small muted">{s.cash_ceiling_nanos != null ? `cash ceiling ${dollars(s.cash_ceiling_nanos)}` : 'No cash ceiling'} · {s.cash_remaining_status === 'known' ? `remaining ${dollars(s.cash_remaining_nanos)}` : s.cash_remaining_status === 'unknown_cost' ? 'remaining unknown (unpriced cash)' : 'no cash headroom limit'} · {dollars(s.reserved_cash_nanos)} cash reserved</div></div>
       </div>
       <h3>By agent</h3>
       <table>
@@ -34,13 +34,13 @@ export function Costs({ project, agents, tick }: { project: Project; agents: Age
       <h3>By category</h3>
       <table>
         <thead><tr><th>Category</th><th>Requests</th><th>Effective</th><th>Cash</th></tr></thead>
-        <tbody>{data.by_category.map((c) => <tr key={c.category}><td>{c.category}</td><td>{c.count}</td><td>{dollars(c.effective_nanos)}</td><td>{dollars(c.cash_nanos)}{c.unknown_cash > 0 ? ` + ${c.unknown_cash} unknown` : ''}</td></tr>)}</tbody>
+        <tbody>{data.by_category.map((c) => <tr key={c.category}><td>{c.category}</td><td>{c.count}</td><td>{dollars(c.effective_nanos)}</td><td>{dollars(c.cash_nanos)} known{c.unknown_cash > 0 ? ` + ${c.unknown_cash} unknown` : ''}</td></tr>)}</tbody>
       </table>
       <h3>Recent charges</h3>
       <table>
         <thead><tr><th>When</th><th>Agent</th><th>Category</th><th>Effective</th><th>Cash</th><th>Basis</th><th>Valuation</th></tr></thead>
         <tbody>{data.recent.map((e) => (
-          <tr key={e.id}><td>{ago(e.created_at)}</td><td>{name(e.agent_id)}</td><td>{e.category}</td><td>{dollars(e.effective_nanos)}</td><td>{dollars(e.cash_nanos)}</td><td>{e.cash_basis}</td><td className="small muted">{e.valuation}</td></tr>
+          <tr key={e.id}><td>{ago(e.created_at)}</td><td>{name(e.agent_id)}</td><td>{e.category}</td><td>{dollars(e.effective_nanos)}</td><td>{e.cash_nanos == null ? 'unknown' : dollars(e.cash_nanos)}</td><td>{e.cash_basis}</td><td className="small muted">{e.valuation}</td></tr>
         ))}</tbody>
       </table>
       {quotas.length > 0 && <>
@@ -57,7 +57,7 @@ export function Costs({ project, agents, tick }: { project: Project; agents: Age
           <tr key={m.id} className={m.usable ? '' : 'muted'}><td className="mono">{m.id}</td><td>{m.provider}</td><td>{m.input_per_million ?? '?'}</td><td>{m.cached_input_per_million ?? '?'}</td><td>{m.output_per_million ?? '?'}</td><td>{m.billing}</td><td>{m.usable ? 'usable' : 'no adapter yet'}</td></tr>
         ))}</tbody>
       </table>
-      <div className="small muted">Prices are USD per million tokens from the FlatlineProxy catalog (unverified estimates). Effective charges include configured premiums; subscription use always carries a positive effective charge.</div>
+      <div className="small muted">Prices are USD per million tokens from the FlatlineProxy catalog (unverified estimates). Effective charges are reference valuations, not cash payments; they include configured premiums. Subscription use still has an effective value. Cash charges may be estimated, and a cash ceiling is an admission control based on estimates, not a bank-balance guarantee: pending calls can settle above estimates. Attributions above remain visible by agent, category and event.</div>
     </div>
   )
 }
