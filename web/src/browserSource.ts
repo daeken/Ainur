@@ -1,39 +1,54 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 /**
  * Browser frame source for the session browser view.
  *
- * CONTRACT OWNERSHIP: Tulkas owns the wire contract for the browser-session stream. As of
- * 2026-10-01 no browser/frame-stream document exists in the knowledge store (checked with
- * knowledge_search and ask_knowledge), so this module serves frames from a local MOCK
- * generator and the real SSE transport is implemented against the *expected* shape below,
- * behind `VITE_BROWSER_STREAM`. When Tulkas publishes the contract, only this file needs to
- * change; SessionBrowser consumes the hook and does not care which source is behind it.
+ * Wire contract: knowledge doc `reference/browser-stream-contract` (r1, provisional, owner Tulkas,
+ * revision kr_01a0f84d06e8713f9267c59c23517c39). Reconciled field-by-field 2026-10-01.
  *
- * Expected SSE frame shape (ASSUMED — must be reconciled with Tulkas's contract):
- *   GET <VITE_BROWSER_STREAM>/<sessionId>/stream        (text/event-stream)
- *   event: session  data: { id, agent_id, state, url, title, viewport:{width,height}, started_at }
- *   event: frame    data: { seq, data_url, width, height, url, title, captured_at }
- *   event: closed   data: { reason? }
+ *   GET <base>/{id}/stream   SSE; events `session` | `frame` | `closed` | `error`
+ *   GET <base>/{id}/frame    one-shot latest frame (same `frame` payload)
+ *   GET <base>               index: JSON array of `session` payloads
+ *
+ * `base` is chosen at runtime from `?browserStream=<url>` (so the panel can be pointed at a contract
+ * fixture without a rebuild), else build-time `VITE_BROWSER_STREAM`; the literal value `mock` forces
+ * the local generator. DELIBERATE DEVIATION from the contract: its stated default base is
+ * `/api/v1/browser/sessions`, but the server route does not exist yet (Tulkas owns it), so an unset
+ * value means MOCK rather than a stream that can only 404.
+ *
+ * Contract points implemented here:
+ *  - `frame.seq` is monotonic; a lower seq is ignored (replay-on-connect must not rewind the view).
+ *  - `session`/`frame` are idempotent snapshots, not increments.
+ *  - `closed` is terminal: show ended state, keep the last frame, stop reconnecting.
+ *  - `error` carries `{message, recoverable}`; recoverable errors keep the last frame and the next
+ *    `frame` clears the banner.
+ *  - `disconnected`/`reconnecting` are client-derived from EventSource state, never server events.
+ *  - HTTP 404 (unknown session) must show the no-session state and must NOT reconnect-loop.
+ *  - The index is consulted first so an agent whose browser session lives on a non-primary Ainur
+ *    session is still attributed correctly; while no session exists the index is polled.
  */
 
-export type StreamStatus = 'no-session' | 'connecting' | 'streaming' | 'disconnected' | 'closed'
+export type StreamStatus = 'no-session' | 'connecting' | 'streaming' | 'disconnected'
 
 export interface BrowserFrame {
   seq: number
-  /** `data:image/...;base64,....` — directly usable as an <img src>. */
+  /** `data:image/png;base64,....` — directly usable as an <img src>. */
   data_url: string
   width: number
   height: number
   url: string
   title: string
   captured_at: number
+  /** Additive per contract §3.2 — content-addressed ref; ignored by the panel in v1. */
+  artifact?: string
+  id?: string
+  agent_id?: string
 }
 
 export interface BrowserSessionInfo {
   id: string
   agent_id: string
-  state: 'starting' | 'streaming' | 'closed'
+  state: 'starting' | 'streaming' | 'idle' | 'ended'
   url: string
   title: string
   viewport: { width: number; height: number }
@@ -44,20 +59,37 @@ interface Handlers {
   onSession: (s: BrowserSessionInfo) => void
   onFrame: (f: BrowserFrame) => void
   onStatus: (s: StreamStatus, detail?: string) => void
+  onIgnoredFrame: () => void
+  onError: (message: string | undefined, recoverable?: boolean) => void
+  onEnded: (reason: string) => void
+  /** Accounting only: record that a contract event was consumed. */
+  onEvent: (label: string) => void
 }
 
 interface FrameSourceHandle {
   stop: () => void
 }
 
-const STREAM_BASE: string | undefined = import.meta.env.VITE_BROWSER_STREAM
-export const IS_MOCK_SOURCE = !STREAM_BASE
+const ENV_BASE: string | undefined = import.meta.env.VITE_BROWSER_STREAM
+const POLL_MS = 5000
+/** A `frame` clears a recoverable error banner (contract §3), but not before it has been readable:
+ *  an error co-delivered with a frame in the same network read would otherwise flash for 0 ms. */
+const MIN_NOTICE_MS = 1000
+
+/** Runtime override beats build-time env; `mock` (or unset) selects the local generator. */
+function runtimeBase(): string | undefined {
+  let fromQuery: string | null = null
+  try { fromQuery = new URLSearchParams(window.location.search).get('browserStream') } catch { fromQuery = null }
+  const raw = fromQuery ?? ENV_BASE
+  if (!raw || raw === 'mock') return undefined
+  return raw.replace(/\/+$/, '')
+}
 
 const MOCK_WIDTH = 960
 const MOCK_HEIGHT = 600
 const MOCK_INTERVAL_MS = 250
 
-/** Draws a plausible "page" so the view has something real to render while the contract lands. */
+/** Draws a plausible "page" so the view has something real to render. */
 function paintMockFrame(canvas: HTMLCanvasElement, agentId: string, seq: number, elapsedMs: number) {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
@@ -156,12 +188,14 @@ function createMockSource(agentId: string, h: Handlers): FrameSourceHandle {
     if (stopped) return
     session.state = 'streaming'
     h.onSession({ ...session })
+    h.onEvent('session')
     h.onStatus('streaming')
     const tick = () => {
       if (stopped) return
       seq += 1
       const elapsed = Date.now() - startedAt
       paintMockFrame(canvas, agentId, seq, elapsed)
+      h.onEvent('frame')
       h.onFrame({
         seq,
         data_url: canvas.toDataURL('image/jpeg', 0.72),
@@ -170,6 +204,8 @@ function createMockSource(agentId: string, h: Handlers): FrameSourceHandle {
         url: session.url,
         title: session.title,
         captured_at: Date.now(),
+        id: session.id,
+        agent_id: agentId,
       })
       timer = window.setTimeout(tick, MOCK_INTERVAL_MS)
     }
@@ -185,25 +221,124 @@ function createMockSource(agentId: string, h: Handlers): FrameSourceHandle {
   }
 }
 
-function createSseSource(base: string, sessionId: string | undefined, h: Handlers): FrameSourceHandle {
-  if (!sessionId) {
-    h.onStatus('no-session')
-    return { stop() {} }
+function parseData<T>(e: Event): T | undefined {
+  const data = (e as MessageEvent).data
+  if (typeof data !== 'string') return undefined
+  try { return JSON.parse(data) as T } catch { return undefined }
+}
+
+type Target = { kind: 'stream'; id: string } | { kind: 'poll'; detail: string } | { kind: 'stop'; detail: string }
+
+/**
+ * Resolve which browser session to watch. The contract's index is authoritative: if it answers and
+ * the agent has no live session we show no-session (and poll). If the index route is missing or
+ * unreachable (the deployment case until Tulkas's route lands) we fall back to the Ainur session id
+ * the panel already knows, and let a 404 there produce the no-session state per contract §2.
+ */
+async function resolveTarget(base: string, agentId: string, hintSessionId?: string): Promise<Target> {
+  try {
+    const res = await fetch(base, { headers: { accept: 'application/json' } })
+    if (!res.ok) {
+      return hintSessionId
+        ? { kind: 'stream', id: hintSessionId }
+        : { kind: 'stop', detail: `browser session index returned HTTP ${res.status}` }
+    }
+    const list = (await res.json()) as unknown
+    if (!Array.isArray(list)) {
+      return hintSessionId ? { kind: 'stream', id: hintSessionId } : { kind: 'stop', detail: 'browser session index returned a non-array body' }
+    }
+    const mine = (list as BrowserSessionInfo[]).filter((s) => s && s.agent_id === agentId && typeof s.id === 'string')
+    const pick = mine.find((s) => s.id === hintSessionId) ?? mine[0]
+    if (!pick) return { kind: 'poll', detail: 'no live browser session for this agent' }
+    return { kind: 'stream', id: pick.id }
+  } catch {
+    return hintSessionId
+      ? { kind: 'stream', id: hintSessionId }
+      : { kind: 'stop', detail: 'browser session index unreachable' }
   }
-  const es = new EventSource(`${base}/${encodeURIComponent(sessionId)}/stream`)
-  es.addEventListener('session', (e) => {
-    h.onSession(JSON.parse((e as MessageEvent).data) as BrowserSessionInfo)
-    h.onStatus('streaming')
-  })
-  es.addEventListener('frame', (e) => h.onFrame(JSON.parse((e as MessageEvent).data) as BrowserFrame))
-  es.addEventListener('closed', (e) => {
-    let reason: string | undefined
-    try { reason = (JSON.parse((e as MessageEvent).data) as { reason?: string }).reason } catch { reason = undefined }
-    h.onStatus('closed', reason)
-    es.close()
-  })
-  es.onerror = () => h.onStatus('disconnected', 'event source error (browser will retry)')
-  return { stop: () => es.close() }
+}
+
+function createSseSource(base: string, agentId: string, hintSessionId: string | undefined, h: Handlers): FrameSourceHandle {
+  let stopped = false
+  let pollTimer: number | undefined
+  let es: EventSource | undefined
+  let lastSeq = -1
+
+  const stop = () => {
+    stopped = true
+    window.clearTimeout(pollTimer)
+    es?.close()
+    es = undefined
+  }
+
+  const attach = (id: string) => {
+    if (stopped) return
+    const url = `${base}/${encodeURIComponent(id)}/stream`
+    const src = new EventSource(url)
+    es = src
+
+    src.addEventListener('session', (e) => {
+      const s = parseData<BrowserSessionInfo>(e)
+      if (!s) return
+      h.onEvent('session')
+      h.onSession(s)
+      if (s.state === 'ended') h.onStatus('no-session', 'browser session ended')
+      else h.onStatus('streaming')
+    })
+
+    src.addEventListener('frame', (e) => {
+      const f = parseData<BrowserFrame>(e)
+      if (!f) return
+      if (typeof f.seq === 'number' && f.seq <= lastSeq) { h.onEvent('frame:stale'); h.onIgnoredFrame(); return }
+      lastSeq = f.seq
+      h.onEvent('frame')
+      h.onFrame(f) // the hook clears any error banner, but only after a readable dwell
+    })
+
+    src.addEventListener('closed', (e) => {
+      const c = parseData<{ reason?: string }>(e)
+      h.onEvent('closed')
+      h.onEnded(c?.reason ?? 'closed')
+      h.onStatus('no-session', c?.reason ? `session ended: ${c.reason}` : 'session ended')
+      stop()
+    })
+
+    src.addEventListener('error', (e) => {
+      const ev = e as MessageEvent
+      // A server-sent `error` event is a MessageEvent with `data`; the browser's own transport error
+      // event for EventSource is a plain Event with no `data`. Same event name, so discriminate.
+      if (typeof ev.data === 'string' && ev.data.length > 0) {
+        const p = parseData<{ message?: string; recoverable?: boolean }>(e)
+        h.onEvent('error')
+        h.onError(p?.message ?? 'browser stream error', p?.recoverable)
+        return
+      }
+      h.onEvent('transport-error')
+      if (src.readyState === EventSource.CLOSED) {
+        h.onStatus('no-session', `${url} could not be opened (fatal: unknown session, or the stream route is unavailable)`)
+        stop()
+        return
+      }
+      h.onStatus('disconnected', 'frame source dropped; the browser is retrying')
+    })
+  }
+
+  const resolve = async () => {
+    if (stopped) return
+    h.onStatus('connecting', 'resolving browser session')
+    const target = await resolveTarget(base, agentId, hintSessionId)
+    if (stopped) return
+    if (target.kind === 'stop') { h.onStatus('no-session', target.detail); return }
+    if (target.kind === 'poll') {
+      h.onStatus('no-session', target.detail)
+      pollTimer = window.setTimeout(() => { void resolve() }, POLL_MS)
+      return
+    }
+    attach(target.id)
+  }
+
+  void resolve()
+  return { stop }
 }
 
 export interface BrowserStreamState {
@@ -211,29 +346,47 @@ export interface BrowserStreamState {
   session: BrowserSessionInfo | null
   frame: BrowserFrame | null
   frameCount: number
+  /** Frames dropped because their `seq` was not newer (contract §3.2). */
+  ignoredFrames: number
   fps: number
   attempt: number
-  error?: string
+  /** Detail for the current status (why no session, why disconnected). */
+  detail?: string
+  /** Last `error` event message; cleared by the next frame. */
+  notice?: string
+  /** Set when the server sent `closed`. */
+  endedReason?: string
+  /** Count of contract events this view consumed, e.g. `{ session: 1, frame: 14, error: 1 }`. */
+  eventsSeen: Record<string, number>
+  /** Human label for where frames come from ('mock' or the stream base). */
+  source: string
   mock: boolean
-  /** Mock-only dev controls so the disconnected/no-session states are demonstrable. */
   simulateDrop: () => void
   reconnectNow: () => void
   endSession: () => void
   startSession: () => void
 }
 
-export function useBrowserStream(agentId: string | undefined, sessionId?: string): BrowserStreamState {
+export function useBrowserStream(agentId: string | undefined, hintSessionId?: string): BrowserStreamState {
   const [status, setStatus] = useState<StreamStatus>('no-session')
   const [session, setSession] = useState<BrowserSessionInfo | null>(null)
   const [frame, setFrame] = useState<BrowserFrame | null>(null)
   const [frameCount, setFrameCount] = useState(0)
+  const [ignoredFrames, setIgnoredFrames] = useState(0)
   const [fps, setFps] = useState(0)
   const [attempt, setAttempt] = useState(1)
-  const [error, setError] = useState<string | undefined>()
+  const [detail, setDetail] = useState<string | undefined>()
+  const [notice, setNotice] = useState<string | undefined>()
+  const [endedReason, setEndedReason] = useState<string | undefined>()
+  const [eventsSeen, setEventsSeen] = useState<Record<string, number>>({})
   const [ended, setEnded] = useState(false)
   const [nonce, setNonce] = useState(0)
   const handleRef = useRef<FrameSourceHandle | undefined>(undefined)
   const timestampsRef = useRef<number[]>([])
+  const noticeAtRef = useRef(0)
+
+  const base = useMemo(() => runtimeBase(), [])
+  const mock = !base
 
   useEffect(() => {
     if (!agentId || ended) {
@@ -241,29 +394,56 @@ export function useBrowserStream(agentId: string | undefined, sessionId?: string
       setSession(null)
       setFrame(null)
       setFrameCount(0)
+      setIgnoredFrames(0)
       setFps(0)
+      setDetail(ended ? 'session ended' : undefined)
       return
     }
     setStatus('connecting')
-    setError(undefined)
+    setDetail(undefined)
+    setNotice(undefined)
+    setEndedReason(undefined)
+    setSession(null)
+    setFrame(null)
+    setFrameCount(0)
+    setIgnoredFrames(0)
+    setFps(0)
+    setEventsSeen({})
     timestampsRef.current = []
+
     const handlers: Handlers = {
       onSession: setSession,
-      onStatus: (s, detail) => { setStatus(s); if (s === 'disconnected') setError(detail ?? 'stream disconnected') },
       onFrame: (f) => {
         setFrame(f)
         setFrameCount((n) => n + 1)
         const now = Date.now()
+        if (noticeAtRef.current && now - noticeAtRef.current >= MIN_NOTICE_MS) {
+          noticeAtRef.current = 0
+          setNotice(undefined)
+        }
         const stamps = timestampsRef.current
         stamps.push(now)
         while (stamps.length > 0 && now - stamps[0] > 2000) stamps.shift()
         setFps(stamps.length > 1 ? Math.round((stamps.length * 1000) / (now - stamps[0])) : 0)
       },
+      onStatus: (s, d) => {
+        setStatus(s)
+        if (d !== undefined) setDetail(d)
+        if (s === 'disconnected') setAttempt((a) => a + 1)
+      },
+      onIgnoredFrame: () => setIgnoredFrames((n) => n + 1),
+      onEvent: (label) => setEventsSeen((prev) => ({ ...prev, [label]: (prev[label] ?? 0) + 1 })),
+      onError: (message, recoverable) => {
+        if (message === undefined) { noticeAtRef.current = 0; setNotice(undefined); return }
+        noticeAtRef.current = Date.now()
+        setNotice(recoverable === false ? `${message} (fatal)` : message)
+      },
+      onEnded: setEndedReason,
     }
-    const handle = STREAM_BASE ? createSseSource(STREAM_BASE, sessionId, handlers) : createMockSource(agentId, handlers)
+    const handle = base ? createSseSource(base, agentId, hintSessionId, handlers) : createMockSource(agentId, handlers)
     handleRef.current = handle
     return () => { handle.stop(); handleRef.current = undefined }
-  }, [agentId, sessionId, ended, nonce])
+  }, [agentId, hintSessionId, ended, nonce, base])
 
   const reconnectNow = useCallback(() => {
     handleRef.current?.stop()
@@ -277,7 +457,7 @@ export function useBrowserStream(agentId: string | undefined, sessionId?: string
     handleRef.current?.stop()
     handleRef.current = undefined
     setStatus('disconnected')
-    setError('frame source dropped (simulated)')
+    setDetail('frame source dropped (simulated)')
     setAttempt((a) => a + 1)
     window.setTimeout(() => setNonce((n) => n + 1), 1500)
   }, [])
@@ -294,5 +474,9 @@ export function useBrowserStream(agentId: string | undefined, sessionId?: string
     setNonce((n) => n + 1)
   }, [])
 
-  return { status, session, frame, frameCount, fps, attempt, error, mock: IS_MOCK_SOURCE, simulateDrop, reconnectNow, endSession, startSession }
+  return {
+    status, session, frame, frameCount, ignoredFrames, fps, attempt, detail, notice, endedReason, eventsSeen,
+    source: base ?? 'mock', mock,
+    simulateDrop, reconnectNow, endSession, startSession,
+  }
 }

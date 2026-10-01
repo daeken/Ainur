@@ -174,3 +174,6 @@ code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); 
 .state-pill.browser-status.connecting { color: var(--warn); border-color: var(--warn); }
 .state-pill.browser-status.disconnected { color: var(--bad); border-color: var(--bad); }
 .state-pill.browser-status.closed, .state-pill.browser-status.no-session { color: var(--muted); }
+
+.browser-notice { color: var(--bad); border: 1px solid var(--bad); border-radius: 6px; padding: 6px 8px; background: rgba(200, 60, 60, 0.08); }
+.browser-source-url { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
