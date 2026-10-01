@@ -28,8 +28,10 @@ switch(command) {
 	}
 	case "run": {
 		using var supervisor = new Supervisor(opts, releases);
-		Console.CancelKeyPress += (_, e) => { e.Cancel = true; supervisor.Shutdown(); };
-		AppDomain.CurrentDomain.ProcessExit += (_, _) => supervisor.Shutdown();
+		// SIGINT/SIGTERM stop the runtime cleanly before the supervisor exits, so no runtime is left orphaned.
+		void OnSignal(System.Runtime.InteropServices.PosixSignalContext ctx) { ctx.Cancel = true; supervisor.RequestShutdown(); }
+		using var sigint = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGINT, OnSignal);
+		using var sigterm = System.Runtime.InteropServices.PosixSignalRegistration.Create(System.Runtime.InteropServices.PosixSignal.SIGTERM, OnSignal);
 		return await supervisor.RunAsync();
 	}
 	default:

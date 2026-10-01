@@ -42,10 +42,10 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 	Process? Runtime;
 	string? RunningRelease;
 
-	public void Shutdown() {
-		if(Cts.IsCancellationRequested) return;
+	/// <summary>Ends the supervision loop; RunAsync then stops the runtime before returning.</summary>
+	public void RequestShutdown() {
+		Log("Shutdown requested");
 		Cts.Cancel();
-		StopRuntimeAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
 	}
 
 	void Log(string message) {
@@ -89,6 +89,7 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 						crashTimes.Clear();
 					}
 					await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(crashTimes.Count, 5))), Cts.Token).ContinueWith(_ => { });
+				if(Cts.IsCancellationRequested) break;
 				}
 				if(Cts.IsCancellationRequested) break;
 				StartRuntime(state.Active!);
