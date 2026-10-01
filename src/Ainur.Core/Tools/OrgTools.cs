@@ -346,7 +346,16 @@ public sealed class UpdateObjectiveTool : BuiltinTool {
 		if(o.ProjectId != ctx.Project.Id) throw new ToolException("Objective belongs to another project");
 		Org.RequireAuthority(ctx, o.OwnerId, $"update objective {id}");
 		var changes = new JsonObject();
-		if(OptStr(args, "state") is { } state) { changes["state"] = $"{o.State} → {state}"; o.State = state; }
+		var note = "";
+		if(OptStr(args, "state") is { } state) {
+			// Delegated work is accepted by the delegating manager (or someone above the owner), not by its owner.
+			if(state == ObjectiveStates.Complete && o.DelegatedById is { } delegator && delegator != ctx.Agent.Id && o.OwnerId == ctx.Agent.Id) {
+				state = ObjectiveStates.Verifying;
+				note = $" Delegated objectives are accepted by {ctx.Runtime.AgentLabel(delegator)}; it is now 'verifying'. Report the result with evidence so they can accept it.";
+			}
+			changes["state"] = $"{o.State} → {state}";
+			o.State = state;
+		}
 		if(OptStr(args, "add_evidence") is { } ev) { o.Evidence = Org.Evidence(o.Evidence, ev, ctx.Agent.Name); changes["evidence"] = TextUtil.Truncate(ev, 300); }
 		if(OptStr(args, "title") is { } t) { o.Title = t; changes["title"] = t; }
 		if(OptStr(args, "description") is { } d) { o.Description = d; changes["description"] = "revised"; }
@@ -356,7 +365,7 @@ public sealed class UpdateObjectiveTool : BuiltinTool {
 			rt.Store.UpdateObjective(u, o, ctx.Agent.Id, changes);
 			if(OptStr(args, "add_dependency") is { } dep) rt.Store.AddDependency(u, o.Id, dep, ctx.Agent.Id);
 		});
-		return Task.FromResult(ToolResult.Ok($"Updated {o.Id} \"{o.Title}\": {changes.ToJsonString()}", description: $"update {o.Id} [{o.State}]"));
+		return Task.FromResult(ToolResult.Ok($"Updated {o.Id} \"{o.Title}\": {changes.ToJsonString()}{note}", description: $"update {o.Id} [{o.State}]"));
 	}
 }
 

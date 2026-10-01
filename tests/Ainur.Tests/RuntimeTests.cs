@@ -91,7 +91,7 @@ public class RuntimeTests {
 		Assert.Equal(p.RootAgentId, aule.ManagerId);
 		Assert.Equal("forged", File.ReadAllText(Path.Combine(home.Workspace, "impl.txt")));
 		var obj = rt.Store.ObjectivesOwnedBy(aule.Id).Single();
-		Assert.Equal(ObjectiveStates.Complete, obj.State);
+		Assert.Equal(ObjectiveStates.Verifying, obj.State); // owners cannot accept their own delegated work
 		Assert.Equal(p.RootObjectiveId, obj.ParentId);
 		var byAgent = rt.Ledger.ByAgent(p.Id);
 		Assert.True(byAgent[aule.Id].Direct > 0);
