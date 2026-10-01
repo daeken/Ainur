@@ -379,5 +379,9 @@ public static class Migrations {
 			CREATE INDEX quota_usage_window ON quota_usage(window_id, cycle_start, state);
 			CREATE INDEX quota_usage_request ON quota_usage(model_request_id);
 			"""),
+		(6, "model_fallback", """
+			-- Model-level fallback: when a request fails without billing, the gateway retries this model (its own row + quote).
+			ALTER TABLE models ADD COLUMN fallback_model_id TEXT;
+			"""),
 	];
 }

@@ -16,6 +16,32 @@ The primary source is the local, untracked `flatline.json`, which is the proxy's
 
 These assignments are proposed defaults, not claims of benchmarked suitability or globally optimal cost. A manager can change any assignment, reasoning setting, or team structure. Stronger models, lower-cost alternatives, and alternative providers below remain selectable. The routine knowledge-worker model is also a proposed starting choice for the inexpensive tool-finder service. If a route is unavailable, select an explicit alternative and record its identity and price; do not silently substitute a different model under the original model's name.
 
+## OpenAI route assignment and model-level fallback (2026-10-01)
+
+**Owner assignment policy** (ChatGPT subscription is primary; the OpenAI platform API key is fallback):
+
+| Role | Model | Reasoning |
+| --- | --- | --- |
+| Root manager | `gpt-6-astra` | `max` |
+| Subordinate, deep reasoning | `gpt-6-astra` | `high` |
+| Subordinate, raw/mechanical work | `gpt-6.1-sol` | default |
+| OpenAI route unavailable | `deepseek-v4.1-flash` | — |
+
+**Model-level fallback.** Each enabled subscription row (`gpt-6`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+`gpt-5.6-luna`, `gpt-6.1-sol`) carries `fallback_model_id` pointing at its `-api` twin (same upstream slug,
+`billing=api`). `ModelGateway.CallAsync` retries the fallback only when the attempt failed without billing
+(`ProviderException.MayHaveBilled == false`) and the failure class is eligible (auth 401/403, quota 402/429, upstream
+5xx, timeout/unavailable, model-unavailable), and never after any output delta reached the caller or after a billed
+reservation was committed. Each attempt records its own `model_request` row with its own quote and settlement. There is
+no api→subscription direction. A disabled row is never selected as a fallback target, and the gateway refuses to call a
+disabled model.
+
+**Pricing honesty for the openai rows.** No public per-token price has been sourced for these slugs, so every openai row
+ships null rates. Subscription rows settle cash=0 (`billing=subscription`); the `-api` twins settle with
+`cash_basis=unknown` (`Pricing.Settle`, no prices configured). Effective-dollar valuation still applies through the
+conservative reference schedule. Do not invent per-token numbers for these slugs — source and cite real published prices
+before filling them in.
+
 ## Configured model inventory
 
 | Provider family | Model identifiers | Observed routing |

@@ -205,6 +205,7 @@ public sealed class ModelInfo {
 	public string Premium { get; set; } = "1";
 	public bool Enabled { get; set; }
 	public string Notes { get; set; } = "";
+	public string? FallbackModelId { get; set; }
 
 	public decimal? InputRate => InputPerMillion is null ? null : decimal.Parse(InputPerMillion, System.Globalization.CultureInfo.InvariantCulture);
 	public decimal? CachedInputRate => CachedInputPerMillion is null ? null : decimal.Parse(CachedInputPerMillion, System.Globalization.CultureInfo.InvariantCulture);

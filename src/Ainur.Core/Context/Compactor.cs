@@ -71,7 +71,7 @@ public sealed class Compactor(Store store, ModelGateway gateway) {
 		});
 
 		try {
-			var model = store.GetModel(policy.CompactorModelId) ?? store.GetModel(session.ModelId)!;
+			var model = ResolveModel(policy, session);
 			var text = await SummarizeAsync(session, agent, model, previousSummary?.Text, folded, policy, ct);
 			var payload = new SummaryPayload {
 				Text = text, Mode = mode, CoversFromSeq = from, CoversThroughSeq = through, CompactionId = compactionId, PreviousSummaryItemId = previous?.Id,
@@ -101,6 +101,15 @@ public sealed class Compactor(Store store, ModelGateway gateway) {
 	/// <summary>A cut after index i is valid when it does not separate an assistant tool call from its results.</summary>
 	public static bool IsBoundary(List<SessionItem> visible, int i) =>
 		i + 1 >= visible.Count || visible[i + 1].Kind != ItemKinds.ToolResult;
+
+	/// <summary>Resolves the compaction model, refusing disabled rows so a policy naming a retired model can never be used silently.</summary>
+	ModelInfo ResolveModel(ContextPolicy policy, Session session) {
+		var configured = policy.CompactorModelId is null ? null : store.GetModel(policy.CompactorModelId);
+		if(configured is { Enabled: true }) return configured;
+		var sessionModel = session.ModelId is null ? null : store.GetModel(session.ModelId);
+		if(sessionModel is { Enabled: true }) return sessionModel;
+		throw new DomainException($"Compaction model is not usable (configured '{policy.CompactorModelId}', session '{session.ModelId}'): no enabled model available.");
+	}
 
 	async Task<string> SummarizeAsync(Session session, Agent agent, ModelInfo model, string? previous, List<SessionItem> folded, ContextPolicy policy, CancellationToken ct) {
 		// The source must fit the compactor's own window: summarize bounded segments with provenance first if needed.

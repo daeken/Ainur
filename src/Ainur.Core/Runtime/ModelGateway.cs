@@ -29,19 +29,78 @@ public sealed record ModelCallResult(ProviderResponse Response, ModelRequestReco
 /// <summary>
 /// The single path for model requests: quote, atomically reserve budget, record intent, dispatch, then settle
 /// usage into exactly one cost event. Failures release or conservatively retain reservations.
+/// A model with a linked <see cref="ModelInfo.FallbackModelId"/> is retried on the fallback only when the attempt
+/// failed without billing (<see cref="ProviderException.MayHaveBilled"/> false), the failure class is eligible, and
+/// no delta reached the caller. Every attempt is its own model_request row with its own quote and settlement.
 /// </summary>
 public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artifacts, ProviderRegistry providers, QuotaManager quotas) {
 	public async Task<ModelCallResult> CallAsync(ModelCall call, CancellationToken ct) {
-		var provider = providers.Get(call.Model.Provider);
-		var estimate = call.EstimatedInputTokens ?? call.Messages.Sum(Context.ContextBuilder.MessageTokens) + call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
-		var quote = Pricing.Quote(call.Model, estimate, call.MaxOutputTokens);
+		var estimate = call.EstimatedInputTokens
+			?? call.Messages.Sum(Context.ContextBuilder.MessageTokens)
+			+ call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
+		var chain = BuildChain(call.Model);
+		for(var i = 0; i < chain.Count; i++) {
+			var model = chain[i];
+			if(!model.Enabled)
+				throw new DomainException($"Model '{model.Id}' is disabled and cannot be called.");
+			var emitted = false;
+			Action<StreamDelta>? onDelta = call.OnDelta is null ? null : d => { emitted = true; call.OnDelta!(d); };
+			try {
+				return await AttemptAsync(call, model, estimate, onDelta, ct);
+			} catch(Exception e) {
+				var cause = FailoverClass(e);
+				if(i + 1 < chain.Count && !emitted && cause is not null) {
+					var fallback = chain[i + 1];
+					store.Db.Write(u => u.Journal("model.failover", call.ProjectId, "model_request", Ids.New("req"), call.AgentId, new {
+						call.Purpose, primary = model.Id, fallback = fallback.Id, cause, error = TextUtil.Truncate(e.Message, 500),
+					}));
+					continue;
+				}
+				throw;
+			}
+		}
+		throw new InvalidOperationException("empty model chain");
+	}
+
+	/// <summary>Resolves the primary model plus its enabled fallback (if any and different).</summary>
+	List<ModelInfo> BuildChain(ModelInfo primary) {
+		var chain = new List<ModelInfo> { primary };
+		if(!string.IsNullOrEmpty(primary.FallbackModelId)) {
+			var fallback = store.GetModel(primary.FallbackModelId!);
+			if(fallback is { Enabled: true } && fallback.Id != primary.Id && providers.Has(fallback.Provider))
+				chain.Add(fallback);
+		}
+		return chain;
+	}
+
+	/// <summary>
+	/// Classifies a provider failure for fallback eligibility. Returns null when the failure is ineligible:
+	/// it may have billed, it is not a <see cref="ProviderException"/>, or its class is not one that justifies
+	/// re-routing (auth, quota/402/429, upstream 5xx, timeout/unavailable, model-unavailable).
+	/// </summary>
+	static string? FailoverClass(Exception e) {
+		if(e is not ProviderException pe || pe.MayHaveBilled) return null;
+		if(pe.Status is { } s) {
+			if(s is 401 or 403) return "auth";
+			if(s is 402 or 429) return "quota";
+			if(s >= 500) return "upstream";
+			if(s is 404 or 422) return "model_unavailable";
+			return null;
+		}
+		// No HTTP status: a transport/connect failure is retryable; configuration errors are not.
+		return pe.Retryable ? "unavailable" : null;
+	}
+
+	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, long estimate, Action<StreamDelta>? onDelta, CancellationToken ct) {
+		var provider = providers.Get(model.Provider);
+		var quote = Pricing.Quote(model, estimate, call.MaxOutputTokens);
 		var record = new ModelRequestRecord {
 			Id = Ids.New("req"), ProjectId = call.ProjectId, SessionId = call.SessionId, AgentId = call.AgentId, ObjectiveId = call.ObjectiveId,
-			Purpose = call.Purpose, ModelId = call.Model.Id, Provider = call.Model.Provider, UpstreamModel = call.Model.UpstreamModel,
+			Purpose = call.Purpose, ModelId = model.Id, Provider = model.Provider, UpstreamModel = model.UpstreamModel,
 			State = "dispatched", Quote = JsonUtil.Serialize(quote), ContextRevision = call.ContextRevision, StartedAt = Clock.Now,
 		};
 		var request = new ProviderRequest {
-			Model = call.Model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = call.ReasoningEffort,
+			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = call.ReasoningEffort,
 		};
 		// Intent and reservation commit before dispatch so a crash leaves evidence of a possibly-billed request.
 		store.Db.Write(u => {
@@ -49,7 +108,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			if(call.ToolBindings is not null)
 				u.Execute("UPDATE model_requests SET tool_bindings=@b WHERE id=@Id", new { b = JsonUtil.Serialize(call.ToolBindings), record.Id });
 			// Quota holds are taken in every applicable window together with the dollar reservation.
-			var holds = quotas.Reserve(u, call.Model, record.Id, estimate, call.MaxOutputTokens);
+			var holds = quotas.Reserve(u, model, record.Id, estimate, call.MaxOutputTokens);
 			if(holds.Count > 0) {
 				quote.ScarcityFloor = Math.Max(quote.ScarcityFloor, holds.Max(h => h.Scarcity));
 				quote.ReservedEffectiveNanos = Math.Max(quote.ReservedEffectiveNanos,
@@ -58,12 +117,12 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 				u.Execute("UPDATE model_requests SET quote=@Quote WHERE id=@Id", record);
 			}
 			ledger.Reserve(u, call.ProjectId, record.Id, quote);
-			u.Journal("model.dispatched", call.ProjectId, "model_request", record.Id, call.AgentId, new { call.Purpose, model = call.Model.Id, estimate, reserved_effective = quote.ReservedEffectiveNanos });
+			u.Journal("model.dispatched", call.ProjectId, "model_request", record.Id, call.AgentId, new { call.Purpose, model = model.Id, estimate, reserved_effective = quote.ReservedEffectiveNanos });
 		});
 
 		ProviderResponse response;
 		try {
-			response = await provider.CompleteAsync(request, call.OnDelta, ct);
+			response = await provider.CompleteAsync(request, onDelta, ct);
 		} catch(Exception e) {
 			var mayHaveBilled = e is ProviderException { MayHaveBilled: true } || e is OperationCanceledException;
 			store.Db.Write(u => {
@@ -98,7 +157,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			var usage = response.Usage.Reported ? response.Usage : new Usage { InputTokens = estimate, OutputTokens = Tokens.Estimate(response.Content) + Tokens.Estimate(response.Reasoning), Reported = false };
 			cost = ledger.Settle(u, record, Pricing.Settle(quote, usage, quotas.Commit(u, record.Id, usage)), call.Category, call.SponsorAgentId);
 			u.Journal("model.completed", call.ProjectId, "model_request", record.Id, call.AgentId, new {
-				call.Purpose, model = call.Model.Id, usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens, response.FinishReason,
+				call.Purpose, model = model.Id, usage.InputTokens, usage.CachedInputTokens, usage.OutputTokens, response.FinishReason,
 				tool_calls = response.ToolCalls.Count, effective_nanos = cost?.EffectiveNanos, cash_nanos = cost?.CashNanos,
 			});
 		});

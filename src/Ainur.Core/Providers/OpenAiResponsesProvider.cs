@@ -41,6 +41,10 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 			: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
 
 	public async Task<ProviderResponse> CompleteAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
+		// Model rows with billing=api (the `-api` twins) always use the platform API route regardless of
+		// AINUR_OPENAI_ROUTE; the subscription rows honor the route setting (auto/subscription/api).
+		if(string.Equals(request.Model.Billing, "api", StringComparison.OrdinalIgnoreCase))
+			return await CompleteApiAsync(request, onDelta, ct);
 		var route = routeSetting().Trim().ToLowerInvariant();
 		switch(route) {
 			case "api":

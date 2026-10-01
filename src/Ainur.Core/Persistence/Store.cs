@@ -261,12 +261,12 @@ public sealed class Store(Db db) {
 	public ModelInfo? GetModel(string id) => Db.Read(c => c.QuerySingleOrDefault<ModelInfo>("SELECT * FROM models WHERE id=@id", new { id }));
 
 	public void UpsertModel(Db.Unit u, ModelInfo m) => u.Execute("""
-		INSERT INTO models(id,provider,upstream_model,display_name,context_tokens,max_output_tokens,input_per_million,cached_input_per_million,output_per_million,price_provenance,billing,premium,enabled,notes)
-		VALUES(@Id,@Provider,@UpstreamModel,@DisplayName,@ContextTokens,@MaxOutputTokens,@InputPerMillion,@CachedInputPerMillion,@OutputPerMillion,@PriceProvenance,@Billing,@Premium,@Enabled,@Notes)
+		INSERT INTO models(id,provider,upstream_model,display_name,context_tokens,max_output_tokens,input_per_million,cached_input_per_million,output_per_million,price_provenance,billing,premium,enabled,notes,fallback_model_id)
+		VALUES(@Id,@Provider,@UpstreamModel,@DisplayName,@ContextTokens,@MaxOutputTokens,@InputPerMillion,@CachedInputPerMillion,@OutputPerMillion,@PriceProvenance,@Billing,@Premium,@Enabled,@Notes,@FallbackModelId)
 		ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, upstream_model=excluded.upstream_model, display_name=excluded.display_name,
 			context_tokens=excluded.context_tokens, max_output_tokens=excluded.max_output_tokens, input_per_million=excluded.input_per_million,
 			cached_input_per_million=excluded.cached_input_per_million, output_per_million=excluded.output_per_million,
-			price_provenance=excluded.price_provenance, billing=excluded.billing, premium=excluded.premium, enabled=excluded.enabled, notes=excluded.notes
+			price_provenance=excluded.price_provenance, billing=excluded.billing, premium=excluded.premium, enabled=excluded.enabled, notes=excluded.notes, fallback_model_id=excluded.fallback_model_id
 		""", m);
 
 	// ---- Tool invocations, model requests, costs ----

@@ -44,6 +44,16 @@ Choose the auth route with `AINUR_OPENAI_ROUTE` (default `auto`):
 - Subscription: `https://chatgpt.com/backend-api/codex/responses`
 - API: `https://api.openai.com/v1/responses`
 
+## Model-level fallback
+
+Each enabled subscription catalog row links to its `-api` twin through `models.fallback_model_id` (migration 6).
+`ModelGateway.CallAsync` retries the fallback only when the primary attempt failed without billing
+(`ProviderException.MayHaveBilled == false`) and the failure class is eligible (auth 401/403, quota 402/429, upstream
+5xx, timeout/unavailable, model-unavailable), and never after any output delta reached the caller or a billed
+reservation was committed. Every attempt is its own `model_request` row with its own quote and settlement: the
+subscription attempt settles cash=0, the `-api` attempt settles with `cash_basis=unknown` (no published prices).
+See `docs/model-catalog.md` for the fallback semantics and the owner's route-assignment policy.
+
 ## Known risks
 
 - **Unofficial use.** Driving the ChatGPT subscription backend from a non-Codex client is unofficial and may break or
@@ -52,7 +62,6 @@ Choose the auth route with `AINUR_OPENAI_ROUTE` (default `auto`):
 - **Refresh-token rotation.** The adapter may rotate the refresh token in `~/.codex/auth.json`, which could desync a
   running Codex CLI. Write-back is atomic and preserves unknown fields, but this is a known uncertainty.
 - **API route not live-verified.** `OPENAI_API_KEY` is not set on the development machine and no keychain entry exists,
-  so the API route is covered by scripted-HTTP unit tests only, not a live call.
-- **Billing attribution for in-attempt failover.** The within-one-attempt subscription→API fallback re-sends the same
-  catalog row (billing `subscription`). Cross-route failover with per-route billing (`-api` twin rows and
-  `models.fallback_model_id`) is a follow-up (model-level fallback) objective.
+  so the API route is covered by scripted-HTTP unit tests only, not a live call. (The owner's platform key currently
+  returns `insufficient_quota` 429 on `api.openai.com` — the 62,500 credits are subscription-continuation credits, not
+  platform API credits — so the subscription route remains primary.)
