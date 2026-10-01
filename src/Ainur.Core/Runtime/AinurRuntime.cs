@@ -83,6 +83,7 @@ public sealed partial class AinurRuntime : IDisposable {
 			return gen;
 		});
 		Recover();
+		McpClients = McpLoader.LoadAsync(this, CancellationToken.None).GetAwaiter().GetResult();
 		ExpiryTimer = new Timer(_ => { try { ExpirePauses(); } catch(Exception e) { Console.Error.WriteLine($"[expiry] {e.Message}"); } }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
 		if(!Options.AutoStartHosts) return;
 		foreach(var agent in Store.ListLiveAgents())
@@ -183,10 +184,12 @@ public sealed partial class AinurRuntime : IDisposable {
 	}
 
 	Timer? ExpiryTimer;
+	List<McpClient> McpClients = [];
 
 	public void Dispose() {
 		ExpiryTimer?.Dispose();
 		foreach(var host in Hosts.Values) host.Dispose();
+		foreach(var client in McpClients) client.DisposeAsync().AsTask().Wait(3000);
 		Hosts.Clear();
 		Db.Write(u => {
 			u.Execute("UPDATE runtime_generations SET stopped_at=@now, stop_reason='clean' WHERE generation=@Generation", new { now = Clock.Now, Generation });

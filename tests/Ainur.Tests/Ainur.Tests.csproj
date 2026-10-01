@@ -24,4 +24,8 @@
     <ProjectReference Include="..\..\src\Ainur.Server\Ainur.Server.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
