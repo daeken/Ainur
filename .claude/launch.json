@@ -4,7 +4,7 @@
     {
       "name": "ainur-dev",
       "runtimeExecutable": "dotnet",
-      "runtimeArgs": ["run", "--project", "src/Ainur.Server", "--", "--home", "/private/tmp/claude-501/-Users-daeken-projects-Ainur/d4114a10-6b5d-4e23-939f-0beceaff9ba3/scratchpad/devhome", "--port", "5181"],
+      "runtimeArgs": ["run", "--project", "src/Ainur.Server", "--", "--home", ".ainur/dev", "--port", "5181"],
       "port": 5181
     }
   ]

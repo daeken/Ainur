@@ -88,7 +88,7 @@ function ContextView({ sessionId, tick }: { sessionId: string; tick: number }) {
       <p><b>Compaction mode:</b> {info.compaction_mode} · turn {info.session.turn_count}</p>
       <p><b>Context:</b> ~{used.toLocaleString()} of {info.usable_budget.toLocaleString()} usable tokens{info.estimated_tokens === undefined ? ' (session not loaded)' : ''}</p>
       <div className="bar"><div style={{ width: `${Math.min(100, (100 * used) / Math.max(1, info.usable_budget))}%` }} /></div>
-      <p><b>Tools:</b> {info.tool_tokens.toLocaleString()} tokens of {info.tool_budget.toLocaleString()} budget ({info.usable_budget ? Math.round((100 * info.tool_tokens) / info.usable_budget) : 0}% of context)</p>
+      <p><b>Tools:</b> {info.tool_tokens.toLocaleString()} tokens of {info.tool_budget.toLocaleString()} budget ({info.usable_budget ? ((100 * info.tool_tokens) / info.usable_budget).toFixed(1) : 0}% of context)</p>
       <div className="tool-list">{info.loaded_tools.sort((a, b) => b.tokens - a.tokens).map((t) => <span key={t.name} className="badge" title={t.version}>{t.name}{t.pinned ? '*' : ''} {t.tokens}</span>)}</div>
       <p><b>Summary:</b> {info.view.summary_item_id ? `covers items through #${info.view.cutoff_seq}` : 'none (full transcript visible)'}</p>
       <div><b>Recent compactions</b></div>

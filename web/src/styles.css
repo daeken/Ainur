@@ -106,7 +106,8 @@ code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); 
 .stream { color: var(--muted); white-space: pre-wrap; margin-top: 4px; max-height: 60px; overflow: hidden; }
 .former { margin-top: 20px; }
 
-.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 420px); gap: 16px; }
+.split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.split.has-detail { grid-template-columns: minmax(0, 1fr) minmax(0, 420px); }
 .objective-tree, .objective-tree ul { list-style: none; padding-left: 18px; margin: 0; }
 .objective-tree { padding-left: 0; }
 .objective { display: flex; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 6px; cursor: pointer; }

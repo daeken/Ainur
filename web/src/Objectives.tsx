@@ -31,7 +31,7 @@ export function Objectives({ project, agents, tick, onSelectAgent }: { project: 
   let evidence: { at?: string; by?: string; evidence: string }[] = []
   try { evidence = sel ? JSON.parse(sel.evidence) : [] } catch { /* malformed */ }
   return (
-    <div className="split">
+    <div className={`split ${sel ? "has-detail" : ""}`}>
       <ul className="objective-tree">{byParent(undefined).map(node)}</ul>
       {sel && (
         <div className="detail">

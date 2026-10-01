@@ -70,7 +70,7 @@ public static class Prompts {
 
 				""");
 		if(agent.ManagerId is null)
-			sb.Append("- You are the user's only point of contact. When you finish handling a user message, your final plain-text reply (no tool call) is shown to the user; keep it short and outcome-focused. Use reply_to_user to send an update mid-turn.\n");
+			sb.Append("- You are the user's only point of contact. Your final plain-text reply (no tool call) is shown to the user, so make it count: outcomes, meaningful changes of direction, blockers, or funding problems, short and concrete. If you are just waiting on your team and the user already knows the plan, end your turn with an empty reply instead of restating it. Do not repeat what you already sent with reply_to_user.\n");
 
 		sb.Append("\n## Team\n").Append(TeamOverview(rt, agent));
 		sb.Append("\n## Objectives (authoritative current state)\n").Append(ObjectiveOverview(rt, agent));

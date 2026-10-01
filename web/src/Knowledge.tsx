@@ -10,7 +10,7 @@ export function Knowledge({ project, tick }: { project: Project; tick: number })
   useEffect(() => { api.get<Doc[]>(`/projects/${project.id}/knowledge`).then(setDocs).catch(console.error) }, [project.id, tick])
   const doc = docs.find((d) => d.doc_key === selected)
   return (
-    <div className="split">
+    <div className={`split ${doc ? "has-detail" : ""}`}>
       <div className="doc-list">
         {docs.length === 0 && <div className="muted">No knowledge documents yet. Agents record requirements, decisions, and observations here.</div>}
         {docs.map((d) => (
