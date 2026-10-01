@@ -27,3 +27,4 @@ npm-debug.log*
 
 # OS
 .DS_Store
+src/Ainur.Server/wwwroot/
