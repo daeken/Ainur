@@ -243,6 +243,7 @@ public sealed partial class AinurRuntime {
 			Store.UpdateSession(u, session);
 			u.Journal("consultation.finished", session.ProjectId, "session", session.Id, agent.Id, new { requester, original = originalSessionId, answer = TextUtil.Truncate(answer, 500) });
 		});
+		ReleasePausesBy(session.Id, $"The consultation fork finished: {TextUtil.Truncate(answer, 600)}");
 		Wake(requester);
 		ReleaseHost(session.Id);
 	}

@@ -431,3 +431,55 @@ public sealed class CostsTool : BuiltinTool {
 		return Task.FromResult(ToolResult.Ok(sb.ToString(), description: "costs"));
 	}
 }
+
+public sealed class RequestPauseTool : BuiltinTool {
+	public override string Name => "request_pause";
+	public override string Description => """
+		Ask the scheduler to pause overlapping work before you change a shared scope. From a consultation fork the default target
+		is your original session; managers may target an agent in their subtree. The target stops at its next safe boundary
+		(acknowledged), unrelated agents continue, and the pause lasts until you release it, your fork finishes, or it expires.
+		""";
+	public override TimeSpan Timeout => TimeSpan.FromMinutes(6);
+	public override IReadOnlyList<string> Tags => ["pause", "coordinate", "claim", "scope", "consult", "fork", "conflict"];
+	public override JsonObject InputSchema => Schema.Object(
+		("scope", Schema.String("What you are changing, e.g. 'src/Ainur.Core/Context/*' or 'interface IModelProvider'."), true),
+		("reason", Schema.String("Why overlapping work must pause."), true),
+		("release_condition", Schema.String("When you will release it."), true),
+		("agent", Schema.String("Target agent (default: your original session when you are a consultation fork)."), false),
+		("ttl_minutes", Schema.Integer("Expiry in minutes (default 30, max 240)."), false),
+		("wait_for_ack", Schema.Boolean("Wait (up to 5 minutes) until the target reaches a safe boundary (default true)."), false));
+
+	public override async Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args) {
+		string target;
+		if(OptStr(args, "agent") is { } who) {
+			var agent = Org.Resolve(ctx, who);
+			if(agent.Id != ctx.Agent.Id && !ctx.Runtime.Store.IsInSubtree(ctx.Agent.Id, agent.Id)) throw new ToolException($"{agent.Name} is outside your subtree; ask a common manager");
+			target = agent.PrimarySessionId ?? throw new ToolException($"{agent.Name} has no session");
+		} else
+			target = ctx.Session.ParentSessionId ?? throw new ToolException("Specify agent: only consultation forks have a default target");
+		if(target == ctx.Session.Id) throw new ToolException("You cannot pause your own session");
+		var r = ctx.Runtime.RequestPause(ctx.Session.Id, target, Str(args, "scope"), Str(args, "reason"), Str(args, "release_condition"), TimeSpan.FromMinutes(Math.Clamp(OptInt(args, "ttl_minutes") ?? 30, 1, 240)));
+		if(OptBool(args, "wait_for_ack") ?? true) {
+			var deadline = DateTime.UtcNow.AddMinutes(5);
+			while(DateTime.UtcNow < deadline && ctx.Runtime.GetPause(r.Id)?.State == "requested")
+				await Task.Delay(500, ctx.CancellationToken);
+		}
+		var state = ctx.Runtime.GetPause(r.Id)!.State;
+		return ToolResult.Ok($"Pause {r.Id} (generation {r.Generation}) on '{r.Scope}' is {state}{(state == "acknowledged" ? ": the target is quiescent at a safe boundary" : "")}. Release it with release_pause when done; it expires {DateTimeOffset.FromUnixTimeMilliseconds(r.ExpiresAt):u}.",
+			description: $"pause {r.Id} {state}");
+	}
+}
+
+public sealed class ReleasePauseTool : BuiltinTool {
+	public override string Name => "release_pause";
+	public override string Description => "Release a pause you requested, with a concise summary of what changed so the paused work can reconcile and resume.";
+	public override IReadOnlyList<string> Tags => ["pause", "release", "resume", "coordinate"];
+	public override JsonObject InputSchema => Schema.Object(("pause_id", Schema.String("Pause request id."), true), ("summary", Schema.String("Decisions and changed artifacts the paused session must know."), true));
+
+	public override Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args) {
+		var r = ctx.Runtime.GetPause(Str(args, "pause_id")) ?? throw new ToolException("Unknown pause request");
+		if(r.RequesterAgentId != ctx.Agent.Id && !ctx.Runtime.Store.IsInSubtree(ctx.Agent.Id, r.RequesterAgentId)) throw new ToolException("Only the requester or its managers can release this pause");
+		ctx.Runtime.ReleasePause(r.Id, ctx.Agent.Id, Str(args, "summary"));
+		return Task.FromResult(ToolResult.Ok($"Released {r.Id}; the target resumes with your summary.", description: $"release {r.Id}"));
+	}
+}

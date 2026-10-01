@@ -50,7 +50,7 @@ public static class NotificationTypes {
 	public static readonly string[] AgentSendable = [Assignment, Result, Decision, Escalation];
 
 	/// <summary>Whether a notification of this type wakes its recipient. Decision notices are background information.</summary>
-	public static bool Wakes(string type) => type is not Decision;
+	public static bool Wakes(string type) => type is not (Decision or Pause);
 }
 
 public static class InvocationStates {

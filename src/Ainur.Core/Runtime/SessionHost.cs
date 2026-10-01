@@ -66,7 +66,9 @@ public sealed class SessionHost : IDisposable {
 				work = false;
 			}
 			if(!work) {
-				SetStatus("idle");
+				// Idle is a safe boundary: record quiescence for any pause request targeting this session.
+				if(Runtime.ActivePause(SessionId) is { State: "requested" }) Runtime.AcknowledgePause(SessionId);
+				SetStatus(Runtime.ActivePause(SessionId) is not null ? "paused" : "idle");
 				if(!WakeRequested) {
 					WakeSignal = new TaskCompletionSource();
 					await WakeSignal.Task;
@@ -97,13 +99,13 @@ public sealed class SessionHost : IDisposable {
 	void SetStatus(string status) {
 		if(Status == status) return;
 		Status = status;
-		var state = status switch { "idle" => "idle", "stopped" => "idle", _ => "running" };
+		var state = status switch { "idle" or "stopped" or "paused" => "idle", _ => "running" };
 		Runtime.Store.Db.Write(u => {
 			u.Execute("UPDATE sessions SET state=CASE WHEN state='finished' THEN state ELSE @state END WHERE id=@SessionId", new { state, SessionId });
 			if(Session.Kind == "primary") {
 				var agent = Runtime.Store.GetAgent(u, AgentId)!;
 				if(AgentStates.IsLive(agent.State) && agent.State != AgentStates.Paused)
-					Runtime.Store.SetAgentState(u, AgentId, status == "idle" ? AgentStates.Sleeping : AgentStates.Working);
+					Runtime.Store.SetAgentState(u, AgentId, status is "idle" or "paused" ? AgentStates.Sleeping : AgentStates.Working);
 			}
 			u.Journal("session.status", Session.ProjectId, "session", SessionId, AgentId, new { status });
 		});

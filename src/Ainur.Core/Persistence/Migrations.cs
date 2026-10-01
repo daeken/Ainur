@@ -335,5 +335,25 @@ public static class Migrations {
 			);
 			CREATE INDEX events_project ON events(project_id, id);
 			"""),
+		(2, "pause_requests", """
+			-- Structured pause requests (e.g. from a consultation fork to its original session), enforced at step boundaries.
+			CREATE TABLE pause_requests (
+				id TEXT PRIMARY KEY,
+				project_id TEXT NOT NULL,
+				requester_session_id TEXT NOT NULL,
+				requester_agent_id TEXT NOT NULL,
+				target_session_id TEXT NOT NULL,
+				scope TEXT NOT NULL,
+				reason TEXT NOT NULL,
+				release_condition TEXT NOT NULL,
+				generation INTEGER NOT NULL,
+				state TEXT NOT NULL,             -- requested | acknowledged | released | expired
+				created_at INTEGER NOT NULL,
+				acknowledged_at INTEGER,
+				released_at INTEGER,
+				expires_at INTEGER NOT NULL
+			);
+			CREATE INDEX pause_requests_target ON pause_requests(target_session_id, state);
+			"""),
 	];
 }

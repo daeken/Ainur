@@ -83,6 +83,7 @@ public sealed partial class AinurRuntime : IDisposable {
 			return gen;
 		});
 		Recover();
+		ExpiryTimer = new Timer(_ => { try { ExpirePauses(); } catch(Exception e) { Console.Error.WriteLine($"[expiry] {e.Message}"); } }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
 		if(!Options.AutoStartHosts) return;
 		foreach(var agent in Store.ListLiveAgents())
 			if(agent.PrimarySessionId is not null && agent.State != AgentStates.Paused)
@@ -181,7 +182,10 @@ public sealed partial class AinurRuntime : IDisposable {
 		foreach(var h in Hosts.Values) h.Wake();
 	}
 
+	Timer? ExpiryTimer;
+
 	public void Dispose() {
+		ExpiryTimer?.Dispose();
 		foreach(var host in Hosts.Values) host.Dispose();
 		Hosts.Clear();
 		Db.Write(u => {
@@ -219,7 +223,7 @@ public sealed partial class AinurRuntime : IDisposable {
 	public bool IsPaused(string sessionId) {
 		var s = Store.GetSession(sessionId);
 		if(s is null) return true;
-		return s.State == "paused" || Store.GetAgent(s.AgentId)?.State == AgentStates.Paused;
+		return s.State == "paused" || Store.GetAgent(s.AgentId)?.State == AgentStates.Paused || ActivePause(sessionId) is not null;
 	}
 
 	// ---- Policy and context ----
