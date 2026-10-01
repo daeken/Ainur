@@ -33,6 +33,9 @@ public sealed class PowerShellTool : BuiltinTool {
 		check $LASTEXITCODE. Output is formatted text; save objects for later turns with Save-AinurObject (returns a handle) and Get-AinurObject.
 		""";
 	public override TimeSpan Timeout => TimeSpan.FromMinutes(30);
+	static TimeSpan ScriptTimeout(JsonObject args) => TimeSpan.FromSeconds(Math.Clamp(OptInt(args, "timeout_seconds") ?? 600, 1, 1800));
+	// The watchdog deadline follows the script's own timeout plus slack for cooperative cancellation.
+	public override TimeSpan TimeoutFor(JsonObject args) => ScriptTimeout(args) + TimeSpan.FromSeconds(15);
 	public override IReadOnlyList<string> Tags => ["shell", "command", "script", "run", "git", "build", "test", "dotnet", "npm", "process", "terminal"];
 	public override JsonObject InputSchema => Schema.Object(
 		("script", Schema.String("PowerShell script to run."), true),
@@ -40,8 +43,7 @@ public sealed class PowerShellTool : BuiltinTool {
 
 	public override Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args) {
 		var script = Str(args, "script");
-		var timeout = TimeSpan.FromSeconds(Math.Clamp(OptInt(args, "timeout_seconds") ?? 600, 1, 1800));
-		var result = ctx.Host.PowerShell.Run(script, timeout, ctx.CancellationToken);
+		var result = ctx.Host.PowerShell.Run(script, ScriptTimeout(args), ctx.CancellationToken);
 		return Task.FromResult(new ToolResult {
 			Text = result.Text, IsError = false, Value = result.LastValue,
 			Description = $"powershell: {TextUtil.Truncate(script.Split('\n')[0], 80)}{(result.HadErrors ? " (with errors)" : "")}",

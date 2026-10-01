@@ -49,6 +49,8 @@ public interface ITool {
 	/// <summary>Content-derived version identifier. Built-ins use the assembly version and name.</summary>
 	string Version { get; }
 	TimeSpan Timeout { get; }
+	/// <summary>The deadline for one call, which may depend on its arguments (e.g. a script's own timeout).</summary>
+	TimeSpan TimeoutFor(JsonObject args) => Timeout;
 	/// <summary>Search tags used by the tool finder and goal-based initial selection.</summary>
 	IReadOnlyList<string> Tags { get; }
 	Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args);
@@ -60,6 +62,7 @@ public abstract class BuiltinTool : ITool {
 	public abstract JsonObject InputSchema { get; }
 	public virtual string Version => $"{Name}@builtin-{BuildVersion}";
 	public virtual TimeSpan Timeout => TimeSpan.FromMinutes(2);
+	public virtual TimeSpan TimeoutFor(JsonObject args) => Timeout;
 	public virtual IReadOnlyList<string> Tags => [];
 	public abstract Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args);
 

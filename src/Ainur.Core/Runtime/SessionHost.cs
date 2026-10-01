@@ -282,7 +282,18 @@ public sealed class SessionHost : IDisposable {
 			return (result, invocation, tool);
 		}
 
-		var timeout = tool.Timeout;
+		JsonObject args;
+		try {
+			args = Schema.ParseArguments(arguments);
+		} catch(ToolException e) {
+			result = ToolResult.Error(e.Message);
+			invocation.State = InvocationStates.Failed;
+			invocation.Error = result.Text;
+			invocation.FinishedAt = Clock.Now;
+			Runtime.Store.Db.Write(u => Runtime.Store.InsertInvocation(u, invocation));
+			return (result, invocation, tool);
+		}
+		var timeout = tool.TimeoutFor(args);
 		invocation.State = InvocationStates.Running;
 		invocation.StartedAt = Clock.Now;
 		invocation.DeadlineAt = invocation.StartedAt + (long) timeout.TotalMilliseconds;
@@ -294,7 +305,6 @@ public sealed class SessionHost : IDisposable {
 		using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, StopCts.Token);
 		cts.CancelAfter(timeout);
 		try {
-			var args = Schema.ParseArguments(arguments);
 			var ctx = new ToolContext {
 				Runtime = Runtime, Agent = agent, Session = session, Project = Runtime.Store.GetProject(session.ProjectId)!, InvocationId = invocation.Id,
 				CancellationToken = cts.Token, Host = this,
