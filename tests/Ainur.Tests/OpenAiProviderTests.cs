@@ -65,6 +65,14 @@ public class OpenAiProviderTests {
 		return header + "." + payload + ".sig";
 	}
 
+	// An otherwise-valid access token JWT that is missing the `client_id` claim (used to exercise the refresh diagnostic).
+	static string JwtNoClientId(long expUnixSeconds) {
+		static string B64(string s) => Convert.ToBase64String(Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+		var header = B64("{\"alg\":\"none\",\"typ\":\"JWT\"}");
+		var payload = B64($"{{\"iss\":\"https://auth.openai.com\",\"exp\":{expUnixSeconds},\"https://api.openai.com/auth.chatgpt_account_id\":\"acc_test\"}}");
+		return header + "." + payload + ".sig";
+	}
+
 	static string Sse(params JsonObject[] events) => string.Concat(events.Select(e => "data: " + e.ToJsonString() + "\n\n"));
 
 	static JsonObject Delta(string text) => new() { ["type"] = "response.output_text.delta", ["delta"] = text };
@@ -406,5 +414,98 @@ public class OpenAiProviderTests {
 		} finally {
 			File.Delete(path);
 		}
+	}
+
+	// ---------- robustness fixes from independent verification ----------
+
+	[Fact]
+	public async Task FunctionCallArgumentsDoneOnlyStreamsArguments() {
+		var handler = new ScriptedHandler();
+		handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(
+			new JsonObject { ["type"] = "response.output_item.added", ["output_index"] = 0, ["item"] = new JsonObject { ["type"] = "function_call", ["id"] = "fc_1", ["call_id"] = "call_abc", ["name"] = "get_weather", ["arguments"] = "" } },
+			new JsonObject { ["type"] = "response.function_call_arguments.done", ["item_id"] = "fc_1", ["output_index"] = 0, ["arguments"] = "{\"city\":\"Oslo\"}" },
+			Completed(10, 2))));
+		var provider = Provider(handler);
+		var r = await provider.CompleteAsync(Req(ChatMessage.User("weather?")), null, default);
+		Assert.Single(r.ToolCalls);
+		Assert.Equal("get_weather", r.ToolCalls[0].Name);
+		Assert.Equal("{\"city\":\"Oslo\"}", r.ToolCalls[0].Arguments);
+	}
+
+	[Fact]
+	public async Task FunctionCallArgumentsDoneOverridesAccumulatedDeltas() {
+		var handler = new ScriptedHandler();
+		handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(
+			new JsonObject { ["type"] = "response.output_item.added", ["output_index"] = 0, ["item"] = new JsonObject { ["type"] = "function_call", ["id"] = "fc_1", ["call_id"] = "call_abc", ["name"] = "get_weather", ["arguments"] = "" } },
+			new JsonObject { ["type"] = "response.function_call_arguments.delta", ["item_id"] = "fc_1", ["output_index"] = 0, ["delta"] = "{\"partial\":" },
+			new JsonObject { ["type"] = "response.function_call_arguments.done", ["item_id"] = "fc_1", ["output_index"] = 0, ["arguments"] = "{\"city\":\"Oslo\"}" },
+			Completed(10, 2))));
+		var provider = Provider(handler);
+		var r = await provider.CompleteAsync(Req(ChatMessage.User("weather?")), null, default);
+		Assert.Single(r.ToolCalls);
+		Assert.Equal("{\"city\":\"Oslo\"}", r.ToolCalls[0].Arguments); // authoritative .done wins over the partial delta
+	}
+
+	[Fact]
+	public async Task MidStreamErrorAfterOutputSetsMayHaveBilledTrue() {
+		var handler = new ScriptedHandler();
+		handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(
+			Delta("partial"),
+			new JsonObject { ["type"] = "error", ["message"] = "boom" })));
+		var provider = Provider(handler);
+		var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default));
+		Assert.False(ex.Retryable); // retry stays prohibited
+		Assert.True(ex.MayHaveBilled); // but the request is not claimed definitely unbilled
+		Assert.Contains("boom", ex.Message);
+	}
+
+	[Fact]
+	public async Task MissingClientIdClaimSurfacesSpecificDiagnostic() {
+		var token = JwtNoClientId(ExpUnix(-3600)); // expired and no client_id claim
+		var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ainur-auth-" + Guid.NewGuid().ToString("N") + ".json");
+		try {
+			WriteAuth(path, token, refresh: "rt_old");
+			var handler = new ScriptedHandler(); // no /oauth/token rule: refresh cannot succeed anyway
+			var provider = new OpenAiResponsesProvider(new HttpClient(handler), codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default));
+			Assert.Contains("client_id", ex.Message); // the specific diagnostic, not the generic "no usable credential"
+			Assert.DoesNotContain(token, ex.Message);
+			Assert.DoesNotContain("rt_old", ex.Message);
+		} finally {
+			File.Delete(path);
+		}
+	}
+
+	[Fact]
+	public void MapEffortPreservesFaithfully() {
+		Assert.Equal("none", OpenAiResponsesProvider.MapEffort("none"));
+		Assert.Equal("low", OpenAiResponsesProvider.MapEffort("low"));
+		Assert.Equal("medium", OpenAiResponsesProvider.MapEffort("medium"));
+		Assert.Equal("high", OpenAiResponsesProvider.MapEffort("high"));
+		Assert.Equal("max", OpenAiResponsesProvider.MapEffort("max")); // no longer collapsed to high
+		Assert.Equal("xhigh", OpenAiResponsesProvider.MapEffort("xhigh"));
+		Assert.Equal("ultra", OpenAiResponsesProvider.MapEffort("ultra"));
+		Assert.Equal("medium", OpenAiResponsesProvider.MapEffort(null)); // unspecified → upstream default
+		Assert.Equal("medium", OpenAiResponsesProvider.MapEffort(""));
+	}
+
+	[Fact]
+	public void MapEffortRejectsUnknownValue() {
+		var ex = Assert.Throws<ArgumentException>(() => OpenAiResponsesProvider.MapEffort("bogus"));
+		Assert.Contains("bogus", ex.Message); // the offending value is named, so it is rejected rather than silently remapped
+	}
+
+	[Theory]
+	[InlineData("none", "none")]
+	[InlineData("low", "low")]
+	[InlineData("high", "high")]
+	[InlineData("max", "max")]
+	public async Task EffortSentUpstreamFaithfully(string platformValue, string expected) {
+		var handler = new ScriptedHandler();
+		handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(Delta("ok"), Completed(5, 1))));
+		var provider = Provider(handler);
+		await provider.CompleteAsync(new ProviderRequest { Model = Gpt(), Messages = [ChatMessage.User("hi")], ReasoningEffort = platformValue }, null, default);
+		var body = (JsonObject) JsonNode.Parse(handler.Seen[0].Body)!;
+		Assert.Equal(expected, body["reasoning"]!["effort"]!.GetValue<string>());
 	}
 }

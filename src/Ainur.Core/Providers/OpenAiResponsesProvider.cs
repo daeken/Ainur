@@ -126,11 +126,17 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		if(accountId.Length == 0) return null;
 
 		if(expMs - now < RefreshWindowMs) {
-			var newAccess = await TryRefreshAsync(claims, refresh, obj, path, ct);
+			string? newAccess;
+			try {
+				newAccess = await TryRefreshAsync(claims, refresh, obj, path, ct);
+			} catch(ProviderException) {
+				if(expMs <= now) throw; // token expired and refresh is impossible (e.g. missing client_id): surface the specific diagnostic
+				newAccess = null; // token still valid: a refresh failure is non-fatal
+			}
 			if(newAccess is not null)
 				access = newAccess;
 			else if(expMs <= now)
-				return null; // expired and refresh failed → unusable
+				return null; // expired and refresh failed (transient) → unusable
 			// else: refresh failed but the token is still valid → use it.
 		}
 		return new SubscriptionCredential(access, accountId);
@@ -139,7 +145,8 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 	/// <summary>Refreshes the OAuth token and writes the new token set back atomically. Returns the new access token, or null on failure.</summary>
 	async Task<string?> TryRefreshAsync(Dictionary<string, string> claims, string? refreshToken, JsonObject fileObj, string path, CancellationToken ct) {
 		if(string.IsNullOrEmpty(refreshToken)) return null;
-		if(!claims.TryGetValue("client_id", out var clientId) || string.IsNullOrEmpty(clientId)) return null;
+		if(!claims.TryGetValue("client_id", out var clientId) || string.IsNullOrEmpty(clientId))
+			throw new ProviderException("OpenAI subscription token refresh failed: the access-token JWT is missing the 'client_id' claim required to refresh. Re-authenticate the Codex CLI (codex login) to obtain a refreshable token.");
 		var iss = claims.TryGetValue("iss", out var i) ? i : "https://auth.openai.com";
 		var tokenUrl = iss.TrimEnd('/') + OauthTokenPath;
 		using var msg = new HttpRequestMessage(HttpMethod.Post, tokenUrl) {
@@ -263,14 +270,19 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		["content"] = new JsonArray(new JsonObject { ["type"] = textType, ["text"] = text }),
 	};
 
-	public static string MapEffort(string? effort) => effort switch {
-		"none" => "none",
-		"minimal" => "minimal",
-		"low" => "low",
-		"medium" => "medium",
-		"high" or "xhigh" or "max" or "ultra" => "high",
-		_ => "medium",
-	};
+	/// <summary>
+	/// Maps the platform reasoning-effort vocabulary to the upstream Responses API value. The platform accepts
+	/// none|low|high|max (Organization.AllowedReasoningEfforts); the OpenAI models additionally accept medium (the
+	/// upstream default), xhigh and ultra. Values pass through faithfully — never collapsed or downgraded — and an
+	/// unknown value is rejected rather than silently remapped to the default.
+	/// </summary>
+	public static string MapEffort(string? effort) {
+		var v = string.IsNullOrWhiteSpace(effort) ? "medium" : effort.Trim().ToLowerInvariant();
+		return v switch {
+			"none" or "low" or "medium" or "high" or "max" or "xhigh" or "ultra" => v,
+			_ => throw new ArgumentException($"Unknown reasoning effort '{v}'. Allowed: none, low, medium, high, max, xhigh, ultra."),
+		};
+	}
 
 	async Task<ProviderResponse> SendAsync(string endpoint, ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct, Action<HttpRequestMessage> applyHeaders) {
 		var body = BuildRequest(request);
@@ -302,6 +314,7 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		var raw = new StringBuilder();
 		var sawUsage = false;
 		var sawCompleted = false;
+		var emittedOutput = false;
 		try {
 			using var stream = await resp.Content.ReadAsStreamAsync(ct);
 			using var reader = new StreamReader(stream, Encoding.UTF8);
@@ -319,6 +332,7 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 						if(root.TryGetProperty("delta", out var d) && d.ValueKind == JsonValueKind.String) {
 							var text = d.GetString()!;
 							content.Append(text);
+							emittedOutput = true;
 							onDelta?.Invoke(new("content", text));
 						}
 						break;
@@ -326,6 +340,7 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 						if(root.TryGetProperty("delta", out var rd) && rd.ValueKind == JsonValueKind.String) {
 							var rtext = rd.GetString()!;
 							reasoning.Append(rtext);
+							emittedOutput = true;
 							onDelta?.Invoke(new("reasoning", rtext));
 						}
 						break;
@@ -335,6 +350,17 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 							if(!calls.TryGetValue(index, out var entry)) entry = ("", "", new StringBuilder());
 							entry.Args.Append(ad.GetString());
 							calls[index] = entry;
+							emittedOutput = true;
+						}
+						break;
+					case "response.function_call_arguments.done":
+						// The .done event carries the authoritative full arguments; override any accumulated deltas.
+						if(root.TryGetProperty("arguments", out var doneArgs) && doneArgs.ValueKind == JsonValueKind.String) {
+							var index = IndexFor(root, byItemId, calls);
+							if(!calls.TryGetValue(index, out var entry)) entry = ("", "", new StringBuilder());
+							entry.Args = new StringBuilder(doneArgs.GetString());
+							calls[index] = entry;
+							emittedOutput = true;
 						}
 						break;
 					case "response.output_item.added":
@@ -361,7 +387,9 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 						throw new ProviderException($"{Id} response failed: {TextUtil.Truncate(data, 2000)}", retryable: false, mayHaveBilled: reportedUsage);
 					}
 					case "error":
-						throw new ProviderException($"{Id} error event: {TextUtil.Truncate(data, 2000)}", retryable: false, mayHaveBilled: false);
+						// A mid-stream error after output was produced cannot be retried (correct), but the request must
+						// not be claimed as definitely unbilled — mirror the truncated-stream classification.
+						throw new ProviderException($"{Id} error event: {TextUtil.Truncate(data, 2000)}", retryable: false, mayHaveBilled: emittedOutput);
 					default:
 						break;
 				}
