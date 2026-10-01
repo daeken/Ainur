@@ -53,6 +53,8 @@ public sealed class BrowserSession : IAsyncDisposable {
 	readonly Lock FrameGate = new();
 	Action<BrowserFrame>? FrameHandlers;
 	int Pumping;
+	volatile bool StopRequested;
+	Task? PumpTask;
 	long LastUsedTicks = Environment.TickCount64;
 
 	public event Action<BrowserFrame>? Frame {
@@ -476,34 +478,39 @@ public sealed class BrowserSession : IAsyncDisposable {
 		""";
 
 	void EnsureFramePump() {
-		if(Interlocked.CompareExchange(ref Pumping, 1, 0) == 0) _ = PumpAsync();
+		if(Interlocked.CompareExchange(ref Pumping, 1, 0) == 0) PumpTask = PumpAsync();
 	}
 
 	async Task PumpAsync() {
 		try {
-			while(true) {
+			while(!StopRequested) {
 				Action<BrowserFrame>? handlers;
 				lock(FrameGate) handlers = FrameHandlers;
 				if(handlers is null) break;
-				if(Cdp.IsBusy) {
-					try { await Task.Delay(Options.FrameIntervalMs, Stop.Token).ConfigureAwait(false); } catch(OperationCanceledException) { break; }
-					continue;
+				// Deliberately not cancellable: cancelling an in-flight CDP send while the semaphore wait and the
+				// pending request both unwind resumes every awaiter inline and blew the stack (observed). The pump
+				// is stopped by this flag and by the socket closing instead.
+				if(!Cdp.IsBusy) {
+					try {
+						handlers(await CaptureAsync(touch: false, publish: null, CancellationToken.None).ConfigureAwait(false));
+					} catch when(StopRequested) { break; } catch { }
 				}
-				try {
-					var frame = await CaptureAsync(touch: false, publish: null, Stop.Token).ConfigureAwait(false);
-					handlers(frame);
-				} catch(OperationCanceledException) { break; } catch { }
-				try { await Task.Delay(Options.FrameIntervalMs, Stop.Token).ConfigureAwait(false); } catch(OperationCanceledException) { break; }
+				try { await Task.Delay(Options.FrameIntervalMs, CancellationToken.None).ConfigureAwait(false); } catch { }
 			}
 		} finally {
 			Interlocked.Exchange(ref Pumping, 0);
 			bool again;
-			lock(FrameGate) again = FrameHandlers is not null;
+			lock(FrameGate) again = FrameHandlers is not null && !StopRequested;
 			if(again) EnsureFramePump();
 		}
 	}
 
 	public async ValueTask DisposeAsync() {
+		StopRequested = true;
+		var pump = PumpTask;
+		if(pump is not null) {
+			try { await pump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
+		}
 		Stop.Cancel();
 		try {
 			await Cdp.SendAsync("Browser.close", null, null, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);

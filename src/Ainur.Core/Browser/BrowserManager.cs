@@ -12,6 +12,7 @@ public sealed class BrowserManager : IAsyncDisposable {
 	readonly string Home;
 	readonly ConcurrentDictionary<string, BrowserSession> Sessions = new(StringComparer.Ordinal);
 	readonly ConcurrentDictionary<string, long> StartedAt = new(StringComparer.Ordinal);
+	readonly ConcurrentDictionary<string, string> AgentIds = new(StringComparer.Ordinal);
 	readonly CancellationTokenSource Stop = new();
 	readonly Timer Reaper;
 	static readonly ConditionalWeakTable<Runtime.AinurRuntime, BrowserManager> Instances = new();
@@ -40,10 +41,12 @@ public sealed class BrowserManager : IAsyncDisposable {
 		Sessions[sessionKey] = session;
 		var started = DateTimeOffset.UtcNow;
 		StartedAt[sessionKey] = started.ToUnixTimeMilliseconds();
+		AgentIds[sessionKey] = agentId;
 		session.Frame += frame => PublishFrame(sessionKey, agentId, session, frame);
 		session.Closed += closedKey => {
 			if(Sessions.TryRemove(closedKey, out _)) {
 				StartedAt.TryRemove(closedKey, out _);
+				AgentIds.TryRemove(closedKey, out _);
 				Emit("closed", new JsonObject { ["id"] = closedKey, ["agent_id"] = agentId, ["reason"] = "browser exited" });
 			}
 		};
@@ -79,14 +82,34 @@ public sealed class BrowserManager : IAsyncDisposable {
 		try { StreamEvent?.Invoke(envelope); } catch { }
 	}
 
-	/// <summary>The last frame captured by a session, if any (for a late-subscribing UI).</summary>
+	/// <summary>Ids of browser sessions whose browser is still alive (drives the UI's session index).</summary>
+	public IReadOnlyList<string> LiveIds => Sessions.Where(kv => kv.Value.IsRunning).Select(kv => kv.Key).ToList();
+
+	/// <summary>The `session` payload for one id, per reference/browser-stream-contract §3.1. Null when unknown.</summary>
+	public JsonObject? SessionSnapshot(string id) {
+		if(!Sessions.TryGetValue(id, out var session)) return null;
+		var frame = session.LatestFrame;
+		return new JsonObject {
+			["id"] = id,
+			["agent_id"] = AgentIds.GetValueOrDefault(id, ""),
+			["state"] = session.IsRunning ? (frame is null ? "starting" : "streaming") : "ended",
+			["url"] = frame?.Url ?? "about:blank",
+			["title"] = frame?.Title ?? "",
+			["viewport"] = new JsonObject { ["width"] = session.Options.Width, ["height"] = session.Options.Height },
+			["started_at"] = StartedAt.GetValueOrDefault(id, Clock.Now),
+		};
+	}
+
+	/// <summary>The last frame captured by a session in `closed`/`frame` wire shape, or null.</summary>
 	public JsonObject? LatestFrameEvent(string sessionKey) {
 		var session = Get(sessionKey);
 		return session?.LatestFrame is { } frame
 			? new JsonObject {
 				["id"] = sessionKey,
+				["agent_id"] = AgentIds.GetValueOrDefault(sessionKey, ""),
 				["seq"] = frame.Sequence,
 				["data_url"] = "data:image/png;base64," + Convert.ToBase64String(frame.Png),
+				["artifact"] = frame.ArtifactRef,
 				["width"] = frame.Width,
 				["height"] = frame.Height,
 				["url"] = frame.Url,
@@ -106,6 +129,7 @@ public sealed class BrowserManager : IAsyncDisposable {
 				if(DateTimeOffset.UtcNow - session.LastUsed > session.Options.IdleTimeout) {
 					if(Sessions.TryRemove(key, out _)) {
 						StartedAt.TryRemove(key, out _);
+						AgentIds.TryRemove(key, out _);
 						Emit("closed", new JsonObject { ["id"] = key, ["reason"] = "idle timeout" });
 					}
 					await session.DisposeAsync().ConfigureAwait(false);

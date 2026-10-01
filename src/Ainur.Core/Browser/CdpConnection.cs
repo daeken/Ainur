@@ -47,6 +47,11 @@ public sealed class CdpConnection : IAsyncDisposable {
 		if (Failure is not null) throw new CdpException($"CDP connection is closed: {Failure.Message}", null);
 		await RoundTrip.WaitAsync(ct).ConfigureAwait(false);
 		try {
+			// Hop to the thread pool before talking to the socket. Without this, a cancellation that lands while a
+			// send is in flight resumes every awaiter inline in the completing thread's stack (semaphore cancel +
+			// pending-request cancel ping-pong); the chain grows per hop and a stack overflow kills the process
+			// instead of surfacing as a TaskCanceledException.
+			await Task.Yield();
 			return await SendCoreAsync(method, parameters, sessionId, ct).ConfigureAwait(false);
 		} finally {
 			RoundTrip.Release();
@@ -67,7 +72,7 @@ public sealed class CdpConnection : IAsyncDisposable {
 			Pending.TryRemove(id, out _);
 			throw;
 		}
-		using var reg = ct.Register(() => tcs.TrySetCanceled(ct));
+		using var reg = ct.Register(static state => ((TaskCompletionSource<JsonNode?>) state!).TrySetCanceled(), tcs);
 		return await tcs.Task.ConfigureAwait(false);
 	}
 
