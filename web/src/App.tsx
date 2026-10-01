@@ -121,6 +121,9 @@ function BudgetCard({ project, onChanged }: { project: Project; onChanged: () =>
   const capped = c.cash_ceiling_nanos != null
   const unlimited = project.no_effective_limit || project.effective_budget_nanos === 0
   const pct = !unlimited && c.budget_nanos > 0 ? Math.max(0, Math.min(100, (100 * (c.effective_nanos + c.reserved_effective_nanos)) / c.budget_nanos)) : null
+  // Older backend JSON serializers omit computed properties on CostSummary. Derive the same
+  // finite headroom from the authoritative raw nanos until all releases emit the nullable field.
+  const effectiveRemaining = c.effective_remaining_nanos ?? (!unlimited ? c.budget_nanos - c.effective_nanos - c.reserved_effective_nanos : null)
   const openEdit = () => { setChoice(initialBudgetChoice(project)); setError(undefined); setEditing(true) }
   const save = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
@@ -135,7 +138,7 @@ function BudgetCard({ project, onChanged }: { project: Project; onChanged: () =>
   return (
     <div className="budget-card">
       <div className="budget-row"><span>Effective reference valuation</span><b>{dollars(c.effective_nanos)}</b></div>
-      <div className="small muted">{unlimited ? 'No effective limit' : `Limit ${dollars(c.effective_limit_nanos ?? c.budget_nanos)} · remaining ${dollars(c.effective_remaining_nanos)}`}</div>
+      <div className="small muted">{unlimited ? 'No effective limit' : `Limit ${dollars(c.effective_limit_nanos ?? c.budget_nanos)} · remaining ${dollars(effectiveRemaining)}`}</div>
       {pct !== null && <div className="bar" role="progressbar" aria-label="Effective reference-cost limit used" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}><div style={{ width: `${pct}%` }} /></div>}
       <div className="small muted">{dollars(c.reserved_effective_nanos)} effective reserved in flight</div>
       <div className="budget-row"><span>Cash (known)</span><b>{dollars(c.cash_known_nanos)}</b></div>
