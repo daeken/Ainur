@@ -39,7 +39,8 @@ public static class BrowserApi {
 			ctx.Response.Headers.CacheControl = "no-cache";
 			ctx.Response.Headers["X-Accel-Buffering"] = "no";
 			var ct = ctx.RequestAborted;
-			var gate = new SemaphoreSlim(1, 1);
+			using var keepaliveStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+			using var gate = new SemaphoreSlim(1, 1);
 			var queue = Channel.CreateBounded<JsonObject>(new BoundedChannelOptions(64) { FullMode = BoundedChannelFullMode.DropOldest });
 			// The manager is the single source of truth; this subscription is removed with the request.
 			Action<JsonObject> handler = envelope => {
@@ -62,17 +63,21 @@ public static class BrowserApi {
 				// Keepalive: proxies and browsers drop idle connections, and an idle browser session sends nothing.
 				var keepalive = Task.Run(async () => {
 					try {
-						while(!ct.IsCancellationRequested) {
-							await Task.Delay(TimeSpan.FromSeconds(15), ct);
+						while(!keepaliveStop.IsCancellationRequested) {
+							await Task.Delay(TimeSpan.FromSeconds(15), keepaliveStop.Token);
 							await WriteAsync(":ka\n\n");
 						}
-					} catch(OperationCanceledException) { } catch { }
+					} catch(OperationCanceledException) { } catch(IOException) { }
 				}, CancellationToken.None);
 				try {
-					await foreach(var envelope in queue.Reader.ReadAllAsync(ct))
-						await WriteAsync(Event((string?) envelope["event"] ?? "frame", envelope["data"]!.AsObject()));
+					await foreach(var envelope in queue.Reader.ReadAllAsync(ct)) {
+						var kind = (string?) envelope["event"] ?? "frame";
+						await WriteAsync(Event(kind, envelope["data"]!.AsObject()));
+						if(kind == "closed") break; // `closed` is terminal; release the HTTP stream and subscriber now.
+					}
 				} catch(OperationCanceledException) { }
-				await keepalive.WaitAsync(TimeSpan.FromSeconds(1)).ContinueWith(_ => { });
+				keepaliveStop.Cancel();
+				await keepalive.ConfigureAwait(false);
 			} finally {
 				manager.StreamEvent -= handler;
 			}
