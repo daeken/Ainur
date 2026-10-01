@@ -214,6 +214,42 @@ public sealed class ReassignAgentTool : BuiltinTool {
 	}
 }
 
+public sealed class SetAgentModelTool : BuiltinTool {
+	public override string Name => "set_agent_model";
+	public override string Description => """
+		Managers: change the model and/or the reasoning effort of an agent in your subtree, or of yourself (agent: "me").
+		The model must exist in the catalog, be enabled, and have a live provider adapter; the effort must be one of none,
+		low, high, max and be supported by the chosen model's provider. The change is journaled as agent.updated and takes
+		effect at the target's next model step (its running primary session is retargeted) — no new session or runtime
+		restart is required. Omitted fields are left unchanged.
+		""";
+	public override IReadOnlyList<string> Tags => ["agent", "model", "reasoning", "effort", "manager", "assign"];
+	public override JsonObject InputSchema => Schema.Object(
+		("agent", Schema.String("Agent id or name to change, or \"me\" for yourself."), true),
+		("model", Schema.String("New model id (see the costs tool for available models)."), false),
+		("reasoning_effort", Schema.String("none, low, high, or max.", "none", "low", "high", "max"), false));
+
+	public override Task<ToolResult> InvokeAsync(ToolContext ctx, JsonObject args) {
+		var target = Str(args, "agent");
+		var agent = target.Equals("me", StringComparison.OrdinalIgnoreCase) || target.Equals("self", StringComparison.OrdinalIgnoreCase)
+			? ctx.Agent : Org.Resolve(ctx, target);
+		AinurRuntime.AgentModelChange change;
+		try {
+			change = ctx.Runtime.SetAgentModel(ctx.Agent.Id, agent.Id, OptStr(args, "model"), OptStr(args, "reasoning_effort"));
+		} catch(DomainException e) {
+			throw new ToolException(e.Message);
+		}
+		var a = change.Agent;
+		var moved = change.SessionsRetargeted.Count;
+		var effect = moved > 0
+			? $"{moved} live primary session(s) retargeted; it applies at the next model step"
+			: "it applies at the target's next model step";
+		return Task.FromResult(ToolResult.Ok(
+			$"{a.Name} is now {a.ModelId} at effort {a.ReasoningEffort ?? "(model default)"}{$" (was {change.PreviousModelId} / {change.PreviousReasoningEffort ?? "default"})"}; {effect}.",
+			description: $"set_agent_model {a.Name}"));
+	}
+}
+
 public sealed class PauseAgentTool : BuiltinTool {
 	public override string Name => "pause_agent";
 	public override string Description => "Managers: pause an agent in your subtree at its next safe boundary.";

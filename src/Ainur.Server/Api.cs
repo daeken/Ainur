@@ -10,6 +10,7 @@ namespace Ainur.Server;
 
 public sealed record CreateProjectRequest(string Name, string? Description, string? WorkspacePath, decimal? BudgetDollars, string? ManagerModel, string? ManagerName);
 public sealed record UpdateProjectRequest(decimal? BudgetDollars, decimal? CashCeilingDollars, bool? ClearCashCeiling, string? Description);
+public sealed record SetAgentModelRequest(string? ModelId, string? ReasoningEffort);
 public sealed record MessageRequest(string Text);
 public sealed record DrainRequest(int? TimeoutSeconds);
 public sealed record UpgradeOutcome(string AttemptId, string State, string ReleaseId, string? Detail);
@@ -109,6 +110,21 @@ public static class Api {
 				sessions = rt.Store.SessionsForAgent(a.Id),
 				spend = new { direct_nanos = spend.Direct, delegated_nanos = spend.Delegated, cash_direct_nanos = spend.CashDirect },
 			});
+		});
+
+		api.MapPatch("/agents/{id}", (AinurRuntime rt, string id, SetAgentModelRequest req) => {
+			try {
+				var change = rt.SetAgentModel(null, id, req.ModelId, req.ReasoningEffort);
+				return Results.Json(new {
+					agent_id = change.Agent.Id, model_id = change.Agent.ModelId, reasoning_effort = change.Agent.ReasoningEffort,
+					previous_model_id = change.PreviousModelId, previous_reasoning_effort = change.PreviousReasoningEffort,
+					sessions_retargeted = change.SessionsRetargeted,
+					// The model of a turn is read from the session at every step (SessionHost.cs:135), so retargeting the
+					// agent's live primary sessions makes the change apply at their next model step; no restart is needed.
+				});
+			} catch(DomainException e) {
+				return Results.BadRequest(new { error = e.Message });
+			}
 		});
 
 		api.MapPost("/agents/{id}/pause", (AinurRuntime rt, string id) => { rt.PauseAgent(id, null, "paused by the user"); return Results.Ok(); });

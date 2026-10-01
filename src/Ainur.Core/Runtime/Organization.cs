@@ -53,6 +53,91 @@ public sealed partial class AinurRuntime {
 		return agent;
 	}
 
+	/// <summary>Reasoning-effort values the platform accepts, matching the create_agent tool schema (Tools/OrgTools.cs:105).</summary>
+	public static readonly string[] AllowedReasoningEfforts = ["none", "low", "high", "max"];
+
+	/// <summary>
+	/// The efforts each provider adapter can actually transmit, derived from the adapters themselves
+	/// (Providers/ChatCompletionsProvider.cs DeepSeekProvider.MapEffort; Providers/OpenAiResponsesProvider.cs MapEffort;
+	/// zai is constructed with sendEffortLevel: false at Providers/ChatCompletionsProvider.cs:183, so it only
+	/// distinguishes thinking disabled/high-ish and does not transmit a level). The model catalog has no per-model
+	/// effort capability column, so support is checked at provider granularity; a provider that is not listed here is
+	/// assumed to accept the platform vocabulary.
+	/// </summary>
+	static readonly Dictionary<string, string[]> ProviderEfforts = new(StringComparer.OrdinalIgnoreCase) {
+		["deepseek"] = ["none", "low", "high", "max"],
+		["openai"] = ["none", "low", "medium", "high", "xhigh", "max", "ultra"],
+		["zai"] = ["none"],
+	};
+
+	public sealed record AgentModelChange {
+		public required Agent Agent { get; init; }
+		public string? PreviousModelId { get; init; }
+		public string? PreviousReasoningEffort { get; init; }
+		public IReadOnlyList<string> SessionsRetargeted { get; init; } = [];
+	}
+
+	/// <summary>
+	/// Changes an agent's model and/or reasoning effort. A null <paramref name="actorId"/> is the operator surface
+	/// (the REST API); otherwise the actor must be a manager changing itself or an agent in its own subtree.
+	///
+	/// Semantics for a running agent (Runtime/SessionHost.cs): the model of a turn comes from
+	/// <c>sessions.model_id</c> (SessionHost.cs:135, read through the live Session property at SessionHost.cs:133)
+	/// and the effort from <c>agents.reasoning_effort</c> (SessionHost.cs:143), both re-read from the database at
+	/// every model step. An effort change therefore takes effect at the target's next model step. A model change
+	/// takes effect at the next model step as well, because this method retargets the agent's live primary session
+	/// rows along with the agent row; no new session and no runtime restart is required. Service sessions keep their
+	/// cheap model by design (Organization.cs:368, Kind = "service") and in-flight consultation forks keep the model they forked with.
+	/// </summary>
+	public AgentModelChange SetAgentModel(string? actorId, string agentId, string? modelId, string? reasoningEffort) {
+		if(modelId is null && reasoningEffort is null) throw new DomainException("Nothing to change: provide model and/or reasoning_effort");
+		var agent = Store.GetAgent(agentId) ?? throw new DomainException($"Unknown agent '{agentId}'");
+		if(actorId is not null) {
+			var actor = Store.GetAgent(actorId) ?? throw new DomainException($"Unknown agent '{actorId}'");
+			if(actor.Role != Roles.Manager) throw new DomainException($"Only a manager may change an agent's model; {actor.Name} is a {actor.Role}");
+			if(actor.Id != agent.Id && !Store.IsInSubtree(actor.Id, agent.Id)) throw new DomainException($"{agent.Name} is not in {actor.Name}'s reporting subtree");
+		}
+		var desiredModel = agent.ModelId;
+		if(modelId is not null) {
+			var model = Store.GetModel(modelId) ?? throw new DomainException($"Unknown model '{modelId}'. Known models: {string.Join(", ", Store.ListModels().Select(m => m.Id))}");
+			if(!model.Enabled || !Providers.Has(model.Provider))
+				throw new DomainException($"Model '{modelId}' is not usable yet (disabled, or provider '{model.Provider}' has no live adapter). Usable models: {string.Join(", ", Store.ListModels().Where(m => m.Enabled && Providers.Has(m.Provider)).Select(m => m.Id))}");
+			desiredModel = model.Id;
+		}
+		var desiredEffort = agent.ReasoningEffort;
+		if(reasoningEffort is not null) {
+			var effort = reasoningEffort.Trim().ToLowerInvariant();
+			if(!AllowedReasoningEfforts.Contains(effort))
+				throw new DomainException($"Unknown reasoning effort '{reasoningEffort}'. Allowed: {string.Join(", ", AllowedReasoningEfforts)}");
+			var chosen = Store.GetModel(desiredModel) ?? throw new DomainException($"Agent {agent.Name} is on unknown model '{desiredModel}'; set a valid model first");
+			if(ProviderEfforts.TryGetValue(chosen.Provider, out var supported) && !supported.Contains(effort))
+				throw new DomainException($"Model '{chosen.Id}' (provider '{chosen.Provider}') does not support reasoning effort '{effort}'. Supported: {string.Join(", ", supported)}");
+			desiredEffort = effort;
+		}
+		var previousModel = agent.ModelId;
+		var previousEffort = agent.ReasoningEffort;
+		var retargeted = new List<string>();
+		Db.Write(u => {
+			agent.ModelId = desiredModel;
+			agent.ReasoningEffort = desiredEffort;
+			agent.UpdatedAt = Clock.Now;
+			Store.UpdateAgent(u, agent);
+			if(desiredModel != previousModel)
+				foreach(var session in u.Query<Session>("SELECT * FROM sessions WHERE agent_id=@agentId AND kind='primary' AND state!='finished'", new { agentId = agent.Id })) {
+					session.ModelId = desiredModel;
+					session.UpdatedAt = Clock.Now;
+					Store.UpdateSession(u, session);
+					retargeted.Add(session.Id);
+				}
+			u.Journal("agent.updated", agent.ProjectId, "agent", agent.Id, actorId, new {
+				model = new { from = previousModel, to = desiredModel },
+				reasoning_effort = new { from = previousEffort, to = desiredEffort },
+				sessions_retargeted = retargeted.Count,
+			});
+		});
+		return new AgentModelChange { Agent = agent, PreviousModelId = previousModel, PreviousReasoningEffort = previousEffort, SessionsRetargeted = retargeted };
+	}
+
 	Agent InsertAgent(Db.Unit u, string projectId, NewAgent spec, string? actorId) {
 		var now = Clock.Now;
 		var modelId = spec.ModelId ?? (spec.Role == Roles.Manager ? Options.ManagerModelId : Options.SpecialistModelId);

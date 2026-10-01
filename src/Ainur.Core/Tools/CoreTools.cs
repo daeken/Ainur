@@ -13,12 +13,14 @@ public static class BuiltinTools {
 			new PowerShellTool(), new MultiEditTool(), new ReadFileTool(), new WriteFileTool(), new ListFilesTool(), new SearchTextTool(),
 			new FindToolsTool(), new LoadToolsTool(), new ReadResultTool(), new ElideResultsTool(), new RetainResultTool(), new ReadHistoryTool(),
 			new SendMessageTool(), new ReplyToUserTool(), new TeamTool(), new CreateAgentTool(), new AssignWorkTool(), new RetireAgentTool(),
-			new ReassignAgentTool(), new PauseAgentTool(), new ResumeAgentTool(), new ConsultTool(), new RequestPauseTool(), new ReleasePauseTool(),
+			new ReassignAgentTool(), new SetAgentModelTool(), new PauseAgentTool(), new ResumeAgentTool(), new ConsultTool(), new RequestPauseTool(), new ReleasePauseTool(),
 			new ObjectivesTool(), new CreateObjectiveTool(), new UpdateObjectiveTool(),
 			new ReadIdentityTool(), new WriteIdentityTool(), new CostsTool(),
 			new KnowledgeSearchTool(), new KnowledgeReadTool(), new KnowledgeWriteTool(), new AskKnowledgeTool(),
 			new RegisterToolTool(), new ListObjectsTool(),
 			new BuildReleaseTool(), new ValidateReleaseTool(), new ActivateReleaseTool(), new ReleaseStatusTool(),
+			new BrowserNavigateTool(), new BrowserReadTool(), new BrowserClickTool(), new BrowserTypeTool(), new BrowserScreenshotTool(),
+			new BrowserWaitTool(), new BrowserBackTool(), new ComputerTool(),
 		];
 		foreach(var tool in tools) rt.Tools.Register(tool);
 	}
