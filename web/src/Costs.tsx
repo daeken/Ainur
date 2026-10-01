@@ -19,11 +19,16 @@ export function Costs({ project, agents, tick }: { project: Project; agents: Age
   const name = (id?: string) => agents.find((a) => a.id === id)?.name ?? '—'
   const s = data.summary
   const finiteEffectiveRemaining = s.effective_remaining_nanos ?? (s.budget_nanos > 0 ? s.budget_nanos - s.effective_nanos - s.reserved_effective_nanos : null)
+  const cashHeadroom = s.cash_remaining_status === 'known' && s.cash_remaining_nanos != null
+    ? `remaining ${dollars(s.cash_remaining_nanos)}`
+    : s.cash_remaining_status === 'unknown_cost' ? 'remaining unknown (unpriced cash)'
+    : s.cash_ceiling_nanos != null ? 'remaining unreported (cash ceiling in effect)'
+    : 'no cash headroom limit'
   return (
     <div className="costs">
       <div className="cards">
         <div className="card"><div className="muted small">Effective reference valuation (not cash)</div><div className="big">{dollars(s.effective_nanos)}</div><div className="small muted">{s.no_effective_limit || s.budget_nanos === 0 ? 'No effective limit' : `limit ${dollars(s.effective_limit_nanos ?? s.budget_nanos)} · remaining ${dollars(finiteEffectiveRemaining)}`} · {dollars(s.reserved_effective_nanos)} reserved</div></div>
-        <div className="card"><div className="muted small">Known cash expense (actual or estimated)</div><div className="big">{dollars(s.cash_known_nanos)}</div><div className="small muted">{s.cash_unknown_count} settled charges with unknown cash · {s.reserved_cash_unknown_count ?? 0} unknown in flight</div><div className="small muted">{s.cash_ceiling_nanos != null ? `cash ceiling ${dollars(s.cash_ceiling_nanos)}` : 'No cash ceiling'} · {s.cash_remaining_status === 'known' ? `remaining ${dollars(s.cash_remaining_nanos)}` : s.cash_remaining_status === 'unknown_cost' ? 'remaining unknown (unpriced cash)' : 'no cash headroom limit'} · {dollars(s.reserved_cash_nanos)} cash reserved</div></div>
+        <div className="card"><div className="muted small">Known cash expense (actual or estimated)</div><div className="big">{dollars(s.cash_known_nanos)}</div><div className="small muted">{s.cash_unknown_count} settled charges with unknown cash · {s.reserved_cash_unknown_count ?? 0} unknown in flight</div><div className="small muted">{s.cash_ceiling_nanos != null ? `cash ceiling ${dollars(s.cash_ceiling_nanos)}` : 'No cash ceiling'} · {cashHeadroom} · {dollars(s.reserved_cash_nanos)} cash reserved</div></div>
       </div>
       <h3>By agent</h3>
       <table>
