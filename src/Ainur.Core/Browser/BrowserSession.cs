@@ -194,7 +194,7 @@ public sealed class BrowserSession : IAsyncDisposable {
 
 	public async Task<BrowserObservation> BackAsync(CancellationToken ct = default) {
 		Touch();
-		var loaded = Cdp.WaitForAsync("Page.loadEventFired", CdpSession, TimeSpan.FromSeconds(15), ct);
+		var loaded = Cdp.WaitForAsync("Page.loadEventFired", CdpSession, TimeSpan.FromSeconds(5), ct);
 		await EvalAsync("history.back()", ct).ConfigureAwait(false);
 		try { await loaded.ConfigureAwait(false); } catch(TimeoutException) { }
 		await SettleAsync(ct).ConfigureAwait(false);
@@ -485,6 +485,10 @@ public sealed class BrowserSession : IAsyncDisposable {
 				Action<BrowserFrame>? handlers;
 				lock(FrameGate) handlers = FrameHandlers;
 				if(handlers is null) break;
+				if(Cdp.IsBusy) {
+					try { await Task.Delay(Options.FrameIntervalMs, Stop.Token).ConfigureAwait(false); } catch(OperationCanceledException) { break; }
+					continue;
+				}
 				try {
 					var frame = await CaptureAsync(touch: false, publish: null, Stop.Token).ConfigureAwait(false);
 					handlers(frame);

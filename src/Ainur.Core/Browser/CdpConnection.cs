@@ -19,6 +19,7 @@ public sealed class CdpConnection : IAsyncDisposable {
 	readonly List<(string? Session, string Method, TaskCompletionSource<JsonNode?> Tcs)> Waits = [];
 	readonly Lock Gate = new();
 	readonly SemaphoreSlim SendGate = new(1, 1);
+	readonly SemaphoreSlim RoundTrip = new(1, 1);
 	readonly CancellationTokenSource Closed = new();
 	int NextId;
 	Exception? Failure;
@@ -33,8 +34,26 @@ public sealed class CdpConnection : IAsyncDisposable {
 		return c;
 	}
 
+	/// <summary>True while a request/response round trip is in flight. Callers that should not queue (the frame pump) use this to skip a tick.</summary>
+	public bool IsBusy => RoundTrip.CurrentCount == 0;
+
 	/// <summary>Sends a protocol command and awaits its result. Throws <see cref="CdpException"/> on a protocol error.</summary>
+	/// <remarks>
+	/// Round trips are serialised on purpose. Chrome's main thread is blocked while it answers a screenshot, so
+	/// overlapping a Runtime.evaluate with a capture can starve the evaluate indefinitely (observed as tools hanging
+	/// for their whole timeout while frames kept flowing). One command at a time keeps every caller answerable.
+	/// </remarks>
 	public async Task<JsonNode?> SendAsync(string method, JsonObject? parameters = null, string? sessionId = null, CancellationToken ct = default) {
+		if (Failure is not null) throw new CdpException($"CDP connection is closed: {Failure.Message}", null);
+		await RoundTrip.WaitAsync(ct).ConfigureAwait(false);
+		try {
+			return await SendCoreAsync(method, parameters, sessionId, ct).ConfigureAwait(false);
+		} finally {
+			RoundTrip.Release();
+		}
+	}
+
+	async Task<JsonNode?> SendCoreAsync(string method, JsonObject? parameters, string? sessionId, CancellationToken ct) {
 		if (Failure is not null) throw new CdpException($"CDP connection is closed: {Failure.Message}", null);
 		var id = Interlocked.Increment(ref NextId);
 		var msg = new JsonObject { ["id"] = id, ["method"] = method };
