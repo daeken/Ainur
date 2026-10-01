@@ -44,7 +44,7 @@ export function AgentPanel({ agentId, agents, tick, onClose, onSelect }: { agent
         <div>
           <h2>{a.name}</h2>
           <div className="small muted">{a.title} · {a.role} · {a.lifetime} · <span className="mono">{a.id}</span></div>
-          <div className="small muted"><span className="mono">{a.model_id}</span>{a.reasoning_effort && <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span>}</div>
+          <div className="small muted"><span className="mono">{a.model_id}</span>{a.reasoning_effort && <> <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span></>}</div>
         </div>
         <button className="link" onClick={onClose}>✕</button>
       </div>
@@ -59,7 +59,7 @@ export function AgentPanel({ agentId, agents, tick, onClose, onSelect }: { agent
           </span></p>
           <p><b>Manager:</b> {detail.manager ? <button className="link" onClick={() => onSelect(detail.manager!.id)}>{detail.manager.name}</button> : 'none (root manager; talks to the user)'}</p>
           {detail.reports.length > 0 && <p><b>Reports:</b> {detail.reports.map((r) => <button key={r.id} className="link" onClick={() => onSelect(r.id)}>{r.name}</button>)}</p>}
-          <p><b>Model:</b> <span className="mono">{a.model_id}</span>{a.reasoning_effort ? <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span> : <span className="small muted"> (no reasoning effort)</span>} · compaction {a.compaction_mode}</p>
+          <p><b>Model:</b> <span className="mono">{a.model_id}</span> {a.reasoning_effort ? <span className="badge effort-badge" title="Reasoning effort">{a.reasoning_effort}</span> : <span className="small muted"> (no reasoning effort)</span>} · compaction {a.compaction_mode}</p>
           <p><b>Spending:</b> direct {dollars(detail.spend.direct_nanos)} (cash {dollars(detail.spend.cash_direct_nanos)}) · delegated {dollars(detail.spend.delegated_nanos)}</p>
           <div><b>Owned objectives</b></div>
           {detail.objectives.length === 0 ? <div className="small muted">none</div> : detail.objectives.map((o) => <div key={o.id} className="small"><span className={`state-pill ${o.state}`}>{o.state}</span> {o.title}</div>)}
