@@ -41,25 +41,20 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 			: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
 
 	public async Task<ProviderResponse> CompleteAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
-		// Model rows with billing=api (the `-api` twins) always use the platform API route regardless of
-		// AINUR_OPENAI_ROUTE; the subscription rows honor the route setting (auto/subscription/api).
+		// Billing fixes the transport for the entire attempt. Only ModelGateway may select and
+		// independently quote/admit a different billing route; credentials never select a paid route.
+		// API-billed rows stay API even under a subscription preference (never reverse-fallback).
 		if(string.Equals(request.Model.Billing, "api", StringComparison.OrdinalIgnoreCase))
 			return await CompleteApiAsync(request, onDelta, ct);
+		if(!string.Equals(request.Model.Billing, "subscription", StringComparison.OrdinalIgnoreCase))
+			throw new ProviderException("OpenAI model billing must be subscription or api.");
 		var route = routeSetting().Trim().ToLowerInvariant();
-		switch(route) {
-			case "api":
-				return await CompleteApiAsync(request, onDelta, ct);
-			case "subscription":
-				return await CompleteSubscriptionAsync(request, onDelta, ct, allowFailover: false);
-			default: { // auto: subscription when a usable credential exists, else api.
-				var cred = await ResolveSubscriptionCredentialAsync(ct);
-				if(cred is not null)
-					return await CompleteSubscriptionAsync(request, onDelta, ct, allowFailover: true, credential: cred);
-				return await CompleteApiAsync(request, onDelta, ct);
-			}
-		}
+		if(route == "api")
+			throw new ProviderException("OpenAI route 'api' conflicts with subscription model billing. Select an API-billed model so the gateway can quote and admit its cash cost.");
+		if(route is not ("auto" or "subscription"))
+			throw new ProviderException("OpenAI route must be auto, subscription, or api.");
+		return await CompleteSubscriptionAsync(request, onDelta, ct);
 	}
-
 	async Task<ProviderResponse> CompleteApiAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
 		var key = apiKey();
 		if(string.IsNullOrEmpty(key))
@@ -70,32 +65,13 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		});
 	}
 
-	async Task<ProviderResponse> CompleteSubscriptionAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct, bool allowFailover, SubscriptionCredential? credential = null) {
-		var emitted = false;
-		Action<StreamDelta>? tracked = onDelta is null ? null : d => { emitted = true; onDelta(d); };
-		ProviderException? failure = null;
-		try {
-			credential ??= await ResolveSubscriptionCredentialAsync(ct);
-			if(credential is null)
-				throw new ProviderException("OpenAI subscription route selected but no usable ChatGPT subscription credential (access token + account id) was found in the Codex auth file.");
-			return await SendAsync(SubscriptionEndpoint, request, tracked, ct, m => BuildSubscriptionHeaders(m, credential));
-		} catch(ProviderException e) {
-			if(!allowFailover || !EligibleForFailover(e, emitted)) throw;
-			failure = e;
-		}
-		var key = apiKey();
-		if(string.IsNullOrEmpty(key))
-			throw new ProviderException($"OpenAI subscription route failed ({failure?.Message}) and no OPENAI_API_KEY is configured for the api fallback (env OPENAI_API_KEY or macOS keychain service 'ai.openai.api').",
-				failure?.Status, retryable: false, mayHaveBilled: false);
-		return await SendAsync(ApiEndpoint, request, onDelta, ct, m => {
-			m.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-			m.Headers.TryAddWithoutValidation("OpenAI-Beta", "responses=experimental");
-		});
+	async Task<ProviderResponse> CompleteSubscriptionAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
+		var credential = await ResolveSubscriptionCredentialAsync(ct);
+		if(credential is null)
+			throw new ProviderException("OpenAI subscription route selected but no usable ChatGPT subscription credential (access token + account id) was found in the Codex auth file.");
+		// Preserve the original error, status and billing uncertainty for gateway fallback policy.
+		return await SendAsync(SubscriptionEndpoint, request, onDelta, ct, m => BuildSubscriptionHeaders(m, credential));
 	}
-
-	static bool EligibleForFailover(ProviderException e, bool emitted) =>
-		!emitted && !e.MayHaveBilled && (e.Status is 401 or 403 or 402 or 429 || e is OpenAiFailoverException);
-
 	static void BuildSubscriptionHeaders(HttpRequestMessage m, SubscriptionCredential cred) {
 		m.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cred.AccessToken);
 		m.Headers.TryAddWithoutValidation("chatgpt-account-id", cred.AccountId);

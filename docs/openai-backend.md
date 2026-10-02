@@ -13,13 +13,13 @@ The provider is registered in `AinurRuntime.DefaultProviders()` (`src/Ainur.Core
 and the catalog rows are enabled by default. No action is needed if a credential source exists; the provider
 resolves credentials at request time.
 
-Choose the auth route with `AINUR_OPENAI_ROUTE` (default `auto`):
+The catalog billing route fixes transport for each attempt. `AINUR_OPENAI_ROUTE` (default `auto`) is a preference/guard, not permission to change billing:
 
 | Value          | Behavior |
 |----------------|----------|
-| `auto`         | Subscription when a usable subscription credential exists, else API. Fails over subscription → API *within one attempt* only before any output was emitted and only when the upstream reported no usage (401/403/402/429, auth-refresh failure, connect error). |
-| `subscription` | Subscription only. Never bills the API key. |
-| `api`          | API key only. Fails fast with a clear error if no key is configured. |
+| `auto`         | Subscription-billed rows use subscription only; API-billed rows use API only. Missing credentials and upstream errors return to the gateway without an internal API retry. |
+| `subscription` | Subscription-billed rows use subscription only. Explicit API-billed rows still use API, never reverse-fallback. |
+| `api`          | API-billed rows use API. Conflicts with a subscription-billed row and fails before any credential resolution or HTTP. |
 
 ## Credential sources
 
@@ -31,7 +31,7 @@ Choose the auth route with `AINUR_OPENAI_ROUTE` (default `auto`):
   `exp - now < 5 min`, the token is refreshed via `POST {iss}/oauth/token` and the refreshed token set is written
   back **atomically** (temp file + rename, mode 0600, unknown fields preserved) so your Codex install stays usable.
 - If refresh fails but the current token is still valid, the request proceeds with the current token; if the token is
-  expired and refresh fails, the subscription credential is treated as unusable (and `auto` falls back to the API route).
+  expired and refresh fails, the original subscription failure is surfaced to the gateway. No API credential is resolved or API transport attempted under the subscription quote.
 - Token values are never written to logs, DB rows, artifacts, or commits.
 
 **API key** (env `OPENAI_API_KEY`, then macOS keychain service `ai.openai.api`):
@@ -51,14 +51,14 @@ Each enabled subscription catalog row links to its `-api` twin through `models.f
 (`ProviderException.MayHaveBilled == false`) and the failure class is eligible (auth 401/403, quota 402/429, upstream
 5xx, timeout/unavailable, model-unavailable), and never after any output delta reached the caller or a billed
 reservation was committed. Every attempt is its own `model_request` row with its own quote and settlement: the
-subscription attempt settles cash=0, the `-api` attempt settles with `cash_basis=unknown` (no published prices).
+subscription attempt settles cash=0, the `-api` attempt settles with `cash_basis=unknown` (no published prices). With a cash ceiling, unknown-priced API admission is rejected before API HTTP; no API attempt reservation remains. The provider never performs a billing-class switch inside an attempt.
 See `docs/model-catalog.md` for the fallback semantics and the owner's route-assignment policy.
 
 ## Known risks
 
 - **Unofficial use.** Driving the ChatGPT subscription backend from a non-Codex client is unofficial and may break or
   violate OpenAI's terms. It was requested explicitly by the project owner; it is isolated behind this adapter and can
-  be disabled via config (`AINUR_OPENAI_ROUTE=api` plus an API key).
+  be avoided by selecting an explicitly API-billed catalog row plus an API key (subject to independent cash admission). Merely setting `AINUR_OPENAI_ROUTE=api` cannot reroute a subscription quote.
 - **Refresh-token rotation.** The adapter may rotate the refresh token in `~/.codex/auth.json`, which could desync a
   running Codex CLI. Write-back is atomic and preserves unknown fields, but this is a known uncertainty.
 - **API route not live-verified.** `OPENAI_API_KEY` is not set on the development machine and no keychain entry exists,
