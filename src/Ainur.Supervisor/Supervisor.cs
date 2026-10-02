@@ -220,19 +220,19 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		healthGeneration == versionGeneration && (!priorGeneration.HasValue || healthGeneration == priorGeneration.Value) &&
 		ownsListener(expectedPid, port);
 
-	// lsof -F emits p<pid>, f<fd>, n<socket-name> records, never human-readable TCP/LISTEN prose.
-	// The lsof command itself filters -a -p childPid -iTCP:port -sTCP:LISTEN.
+	// lsof -F emits p<pid>, f<fd>, n<socket-name>; global LISTEN query must have one PID,
+	// one fd and one 127.0.0.1:port record belonging to the same process and descriptor.
 	internal static bool ListenerRecordsContain(int childPid, int port, string records) {
 		var lines = records.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-		return lines.Count(l => l == "p" + childPid) == 1 &&
-			lines.Any(l => l == "n127.0.0.1:" + port || l == "n*:" + port);
+		if(lines.Length != 3 || lines[0] != "p" + childPid || !System.Text.RegularExpressions.Regex.IsMatch(lines[1], "^f[0-9]+[a-z]?$")) return false;
+		return lines[2] == "n127.0.0.1:" + port;
 	}
 
 	internal static bool OwnsListeningPort(int childPid, int port) {
 		try {
 			using var probe = new Process { StartInfo = new ProcessStartInfo("/usr/sbin/lsof") {
 				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
-				ArgumentList = { "-nP", "-a", "-p", childPid.ToString(), "-iTCP:" + port, "-sTCP:LISTEN", "-F", "pfn" },
+				ArgumentList = { "-nP", "-iTCP:" + port, "-sTCP:LISTEN", "-F", "pfn" },
 			} };
 			if(!probe.Start()) return false;
 			if(!probe.WaitForExit(3000)) return false; // never kill any process (including the read-only probe)
