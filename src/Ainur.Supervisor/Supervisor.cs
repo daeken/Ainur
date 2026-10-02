@@ -33,16 +33,17 @@ public sealed class SupervisorOptions {
 
 /// <summary>
 /// Mechanical release and recovery logic: selects the active release, holds one runtime at a time, checks readiness,
-/// restarts crashed or unresponsive runtimes, kills runtimes stuck past an inline tool deadline, and performs
-/// drain → activate → probation upgrades with automatic rollback.
+/// restarts exited runtimes and performs drain → activate → probation upgrades with automatic rollback.
+/// An unresponsive or stuck *live* child is never killed or replaced: fail closed and await operator recovery.
 /// </summary>
 public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDisposable {
 	readonly HttpClient Http = new() { BaseAddress = new Uri($"http://127.0.0.1:{opts.Port}/"), Timeout = TimeSpan.FromSeconds(10) };
 	readonly CancellationTokenSource Cts = new();
 	Process? Runtime;
 	string? RunningRelease;
+	bool InterventionRequired;
 
-	/// <summary>Ends the supervision loop; RunAsync then stops the runtime before returning.</summary>
+	/// <summary>Ends the supervision loop; RunAsync requests graceful child stop, never forces it.</summary>
 	public void RequestShutdown() {
 		Log("Shutdown requested");
 		Cts.Cancel();
@@ -75,6 +76,12 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		}
 		var crashTimes = new List<DateTime>();
 		while(!Cts.IsCancellationRequested) {
+			// Preserve the sole child after an unsafe stop/readiness/health/deadline outcome.
+			// No upgrade, rollback or replacement is permitted until independently recovered.
+			if(InterventionRequired) {
+				try { await Task.Delay(2000, Cts.Token); } catch(OperationCanceledException) { }
+				continue;
+			}
 			state = releases.LoadState();
 			if(Runtime is null || Runtime.HasExited) {
 				if(Runtime is { HasExited: true }) {
@@ -94,20 +101,31 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 				if(Cts.IsCancellationRequested) break;
 				StartRuntime(state.Active!);
 				if(!await WaitReadyAsync(opts.ReadyTimeout)) {
-					Log($"Runtime {state.Active} did not become ready");
-					await StopRuntimeAsync(TimeSpan.FromSeconds(5));
+					Log($"Runtime {state.Active} did not become ready; requesting graceful stop only");
+					if(!await StopRuntimeAsync(TimeSpan.FromSeconds(5))) {
+						RequireIntervention("runtime failed readiness and did not exit after graceful stop; no replacement");
+					}
 					continue;
 				}
 				Log($"Runtime {state.Active} ready");
 			}
 
 			await WatchDeadlinesAsync();
+			if(InterventionRequired) continue;
+			await HealthCheckAsync();
+			if(InterventionRequired) continue;
 			if(UpgradeRequest.TryTake(opts.Home) is { } req)
 				await UpgradeAsync(req);
-			await HealthCheckAsync();
 			try { await Task.Delay(2000, Cts.Token); } catch(OperationCanceledException) { }
 		}
-		await StopRuntimeAsync(TimeSpan.FromSeconds(30));
+		if(!await StopRuntimeAsync(TimeSpan.FromSeconds(30))) {
+			// Do not release ownership of a live child: an automatic service restart could
+			// otherwise launch a second runtime against the same home and ledger.
+			RequireIntervention("shutdown incomplete; retaining supervisor ownership until child exits voluntarily");
+			var child = Runtime!;
+			await Task.Run(() => child.WaitForExit());
+			Log($"Child PID {child.Id} exited voluntarily after shutdown timeout");
+		}
 		return 0;
 	}
 
@@ -118,15 +136,11 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			HealthFailures = 0;
 			return;
 		}
-		if(++HealthFailures >= 5) {
-			Log("Runtime failed 5 consecutive health checks; restarting");
-			WriteRestartReason(null, "health checks failed");
-			KillRuntime();
-			HealthFailures = 0;
-		}
+		if(++HealthFailures >= 5)
+			RequireIntervention("runtime failed 5 consecutive health checks; child remains alive, no restart");
 	}
 
-	/// <summary>Last-resort recovery for inline tools that ignore cancellation: terminate the whole runtime.</summary>
+	/// <summary>Detect an overdue invocation, but preserve the child for controlled recovery.</summary>
 	async Task WatchDeadlinesAsync() {
 		var path = Path.Combine(opts.Home, "runtime", "inflight.json");
 		if(Runtime is null || Runtime.HasExited || !File.Exists(path)) return;
@@ -138,26 +152,29 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			var deadline = entry!["deadline_at"]!.GetValue<long>();
 			if(now <= deadline + (long) opts.DeadlineGrace.TotalMilliseconds) continue;
 			var invocation = entry["invocation_id"]!.GetValue<string>();
-			Log($"Invocation {invocation} ({entry["tool"]}) exceeded its deadline by {(now - deadline) / 1000}s; terminating runtime");
-			WriteRestartReason(invocation, $"tool {entry["tool"]} exceeded its deadline and ignored cancellation");
-			KillRuntime();
+			RequireIntervention($"Invocation {invocation} ({entry["tool"]}) exceeded its deadline by {(now - deadline) / 1000}s; child preserved");
 			return;
 		}
 	}
 
-	void WriteRestartReason(string? invocationId, string reason) {
-		var path = Path.Combine(opts.Home, "runtime", "restart-reason.json");
-		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-		File.WriteAllText(path, JsonSerializer.Serialize(new { invocation_id = invocationId, reason, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }));
+	void RequireIntervention(string reason) {
+		if(InterventionRequired) return;
+		InterventionRequired = true;
+		Log($"INTERVENTION REQUIRED: {reason}");
 	}
 
 	void StartRuntime(string releaseId) {
+		if(InterventionRequired || Runtime is { HasExited: false })
+			throw new InvalidOperationException("Cannot start another runtime while a child is alive or intervention is required");
 		var dir = releases.PathFor(releaseId);
 		var psi = new ProcessStartInfo("dotnet") { UseShellExecute = false, WorkingDirectory = dir };
 		psi.ArgumentList.Add(Path.Combine(dir, "Ainur.Server.dll"));
 		psi.ArgumentList.Add("--home"); psi.ArgumentList.Add(opts.Home);
 		psi.ArgumentList.Add("--port"); psi.ArgumentList.Add(opts.Port.ToString());
 		psi.ArgumentList.Add("--release"); psi.ArgumentList.Add(releaseId);
+		// Pin the paid-route exclusion on EVERY spawn (initial, crash restart, candidate, rollback).
+		// Never trust the loaded launchd parent's possibly stale environment.
+		psi.Environment["AINUR_OPENAI_ROUTE"] = "subscription";
 		psi.Environment["AINUR_SUPERVISED"] = "1";
 		Runtime = Process.Start(psi)!;
 		RunningRelease = releaseId;
@@ -183,15 +200,20 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		return false;
 	}
 
-	async Task StopRuntimeAsync(TimeSpan timeout) {
-		if(Runtime is null || Runtime.HasExited) return;
-		try { await Http.PostAsync("api/v1/control/stop", null); } catch { }
-		var exited = await Task.Run(() => Runtime.WaitForExit(timeout));
-		if(!exited) KillRuntime();
+	// Kept pure for offline stuck-child/failed-stop tests. The real child is never killed on timeout.
+	internal static async Task<bool> GracefulStopAsync(TimeSpan timeout, Func<Task> requestStop, Func<TimeSpan, Task<bool>> waitExit) {
+		try { await requestStop(); } catch { /* An unreachable stop endpoint does not authorize a kill. */ }
+		return await waitExit(timeout);
 	}
 
-	void KillRuntime() {
-		try { Runtime?.Kill(entireProcessTree: true); Runtime?.WaitForExit(10_000); } catch { }
+	async Task<bool> StopRuntimeAsync(TimeSpan timeout) {
+		if(Runtime is null || Runtime.HasExited) return true;
+		var child = Runtime;
+		var exited = await GracefulStopAsync(timeout,
+			async () => { await Http.PostAsync("api/v1/control/stop", null); },
+			limit => Task.Run(() => child.WaitForExit(limit)));
+		if(!exited) Log($"Child PID {child.Id} did not exit within {timeout}; leaving it alive");
+		return exited;
 	}
 
 	async Task UpgradeAsync(UpgradeRequest req) {
@@ -227,7 +249,11 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			return;
 		}
 		RecordAttempt(attempt, req.ReleaseId, previous, "activating", "");
-		await StopRuntimeAsync(TimeSpan.FromSeconds(60));
+		if(!await StopRuntimeAsync(TimeSpan.FromSeconds(60))) {
+			RequireIntervention("drained runtime did not exit gracefully; candidate NOT started");
+			RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "previous runtime did not exit; preserve drain and child; operator recovery required");
+			return;
+		}
 		StartRuntime(req.ReleaseId);
 		var ok = await WaitReadyAsync(opts.ReadyTimeout);
 		if(ok) {
@@ -246,12 +272,20 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			Log($"Upgrade {attempt} succeeded; active release {req.ReleaseId}");
 			await ReportOutcomeAsync(attempt, "succeeded", req.ReleaseId, "");
 		} else {
-			Log($"Upgrade {attempt} failed readiness or probation; rolling back to {previous}");
-			KillRuntime();
+			Log($"Upgrade {attempt} failed readiness or probation; requesting graceful candidate stop before rollback to {previous}");
+			if(!await StopRuntimeAsync(TimeSpan.FromSeconds(60))) {
+				RequireIntervention("candidate failed, did not exit gracefully; rollback NOT started");
+				RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "candidate still alive; no rollback or replacement");
+				return;
+			}
 			state.Failed.Add(req.ReleaseId);
 			releases.SaveState(state);
 			StartRuntime(previous);
-			await WaitReadyAsync(opts.ReadyTimeout);
+			if(!await WaitReadyAsync(opts.ReadyTimeout)) {
+				RequireIntervention("rollback runtime failed readiness; child preserved without replacement");
+				RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "rollback not ready; intervention required");
+				return;
+			}
 			RecordAttempt(attempt, req.ReleaseId, previous, "rolled_back", "candidate failed readiness or probation");
 			await ReportOutcomeAsync(attempt, "rolled_back", req.ReleaseId, "candidate failed readiness or probation");
 		}
