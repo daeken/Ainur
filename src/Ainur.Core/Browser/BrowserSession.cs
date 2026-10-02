@@ -53,6 +53,9 @@ public sealed class BrowserSession : IAsyncDisposable {
 	readonly Lock FrameGate = new();
 	Action<BrowserFrame>? FrameHandlers;
 	int Pumping;
+	volatile bool StopRequested;
+	int Disposing;
+	Task? PumpTask;
 	long LastUsedTicks = Environment.TickCount64;
 
 	public event Action<BrowserFrame>? Frame {
@@ -62,7 +65,12 @@ public sealed class BrowserSession : IAsyncDisposable {
 	public event Action<string>? Closed;
 
 	public BrowserFrame? LatestFrame => Latest;
-	public bool IsRunning => !Process.HasExited;
+	public bool IsRunning {
+		get {
+			if(Volatile.Read(ref Disposing) != 0) return false;
+			try { return !Process.HasExited; } catch(InvalidOperationException) { return false; }
+		}
+	}
 	public DateTimeOffset LastUsed => DateTimeOffset.UtcNow.AddMilliseconds(-(Environment.TickCount64 - LastUsedTicks));
 	public IReadOnlyList<BrowserFrame> Recent() { lock(FrameGate) return RecentFrames.ToList(); }
 
@@ -92,7 +100,11 @@ public sealed class BrowserSession : IAsyncDisposable {
 		var root = options.DataRoot ?? Path.Combine(Path.GetTempPath(), "ainur-browser");
 		var safeKey = new string(key.Select(c => Path.GetInvalidFileNameChars().Contains(c) || c is ':' or '/' or '\\' ? '_' : c).ToArray());
 		var profile = Path.Combine(root, safeKey, "profile");
-		Directory.CreateDirectory(profile);
+		ct.ThrowIfCancellationRequested();
+		Process? process = null;
+		CdpConnection? cdp = null;
+		try {
+			Directory.CreateDirectory(profile);
 
 		var port = FreePort();
 		var args = new List<string> {
@@ -106,21 +118,14 @@ public sealed class BrowserSession : IAsyncDisposable {
 		};
 		var psi = new ProcessStartInfo(executable) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
 		foreach(var a in args) psi.ArgumentList.Add(a);
-		var process = Process.Start(psi) ?? throw new BrowserException($"Failed to start {executable}");
+		process = Process.Start(psi) ?? throw new BrowserException($"Failed to start {executable}");
 		// Drain the pipes so a full stderr buffer can never block the renderer, and keep the noise out of our logs.
 		_ = Task.Run(() => DrainAsync(process.StandardOutput));
 		_ = Task.Run(() => DrainAsync(process.StandardError));
 
 		var wsUrl = await WaitForEndpointAsync(port, process, options.LaunchTimeout, ct).ConfigureAwait(false);
-		var cdp = await CdpConnection.ConnectAsync(wsUrl, ct).ConfigureAwait(false);
-		JsonNode? created;
-		try {
-			created = await cdp.SendAsync("Target.createTarget", new JsonObject { ["url"] = "about:blank" }, null, ct).ConfigureAwait(false);
-		} catch {
-			await cdp.DisposeAsync();
-			KillProcess(process);
-			throw;
-		}
+		cdp = await CdpConnection.ConnectAsync(wsUrl, ct).ConfigureAwait(false);
+		var created = await cdp.SendAsync("Target.createTarget", new JsonObject { ["url"] = "about:blank" }, null, ct).ConfigureAwait(false);
 		var targetId = created?["targetId"]?.GetValue<string>() ?? throw new BrowserException("Chrome did not return a target id");
 		var attached = await cdp.SendAsync("Target.attachToTarget", new JsonObject { ["targetId"] = targetId, ["flatten"] = true }, null, ct).ConfigureAwait(false);
 		var cdpSession = attached?["sessionId"]?.GetValue<string>() ?? throw new BrowserException("Chrome did not return a session id for the new target");
@@ -129,6 +134,19 @@ public sealed class BrowserSession : IAsyncDisposable {
 		process.EnableRaisingEvents = true;
 		process.Exited += (_, _) => session.Closed?.Invoke(key);
 		return session;
+		} catch {
+			// Every failure path (including pre-cancel, endpoint timeout, socket attach, page configuration)
+			// owns its partial process/profile. Never kill by name or touch the user's Chrome process.
+			if(cdp is not null) { try { await cdp.DisposeAsync().ConfigureAwait(false); } catch { } }
+			if(process is not null) {
+				KillProcess(process);
+				using var exitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+				try { await process.WaitForExitAsync(exitTimeout.Token).ConfigureAwait(false); } catch { }
+				process.Dispose();
+			}
+			try { Directory.Delete(Path.GetDirectoryName(profile)!, recursive: true); } catch { }
+			throw;
+		}
 	}
 
 	async Task ConfigurePageAsync(CancellationToken ct) {
@@ -476,41 +494,51 @@ public sealed class BrowserSession : IAsyncDisposable {
 		""";
 
 	void EnsureFramePump() {
-		if(Interlocked.CompareExchange(ref Pumping, 1, 0) == 0) _ = PumpAsync();
+		if(Interlocked.CompareExchange(ref Pumping, 1, 0) == 0) PumpTask = PumpAsync();
 	}
 
 	async Task PumpAsync() {
 		try {
-			while(true) {
+			while(!StopRequested) {
 				Action<BrowserFrame>? handlers;
 				lock(FrameGate) handlers = FrameHandlers;
 				if(handlers is null) break;
-				if(Cdp.IsBusy) {
-					try { await Task.Delay(Options.FrameIntervalMs, Stop.Token).ConfigureAwait(false); } catch(OperationCanceledException) { break; }
-					continue;
+				// Deliberately not cancellable: cancelling an in-flight CDP send while the semaphore wait and the
+				// pending request both unwind resumes every awaiter inline and blew the stack (observed). The pump
+				// is stopped by this flag and by the socket closing instead.
+				if(!Cdp.IsBusy) {
+					try {
+						handlers(await CaptureAsync(touch: false, publish: null, CancellationToken.None).ConfigureAwait(false));
+					} catch when(StopRequested) { break; } catch { }
 				}
-				try {
-					var frame = await CaptureAsync(touch: false, publish: null, Stop.Token).ConfigureAwait(false);
-					handlers(frame);
-				} catch(OperationCanceledException) { break; } catch { }
-				try { await Task.Delay(Options.FrameIntervalMs, Stop.Token).ConfigureAwait(false); } catch(OperationCanceledException) { break; }
+				try { await Task.Delay(Options.FrameIntervalMs, CancellationToken.None).ConfigureAwait(false); } catch { }
 			}
 		} finally {
 			Interlocked.Exchange(ref Pumping, 0);
 			bool again;
-			lock(FrameGate) again = FrameHandlers is not null;
+			lock(FrameGate) again = FrameHandlers is not null && !StopRequested;
 			if(again) EnsureFramePump();
 		}
 	}
 
 	public async ValueTask DisposeAsync() {
+		if(Interlocked.Exchange(ref Disposing, 1) != 0) return;
+		StopRequested = true;
+		var pump = PumpTask;
+		if(pump is not null) {
+			try { await pump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
+		}
 		Stop.Cancel();
 		try {
 			await Cdp.SendAsync("Browser.close", null, null, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
 		} catch { }
-		await Cdp.DisposeAsync().ConfigureAwait(false);
+		try { await Cdp.DisposeAsync().ConfigureAwait(false); } catch { }
 		KillProcess(Process);
-		try { Directory.Delete(ProfileDirectory, recursive: true); } catch { }
+		using var exitTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+		try { await Process.WaitForExitAsync(exitTimeout.Token).ConfigureAwait(false); } catch { }
+		Process.Dispose();
+		try { Directory.Delete(Path.GetDirectoryName(ProfileDirectory)!, recursive: true); } catch { }
+		Stop.Dispose();
 		Closed?.Invoke(Key);
 	}
 }

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using Ainur.Core.Accounting;
+using Ainur.Core.Browser;
 using Ainur.Core.Context;
 using Ainur.Core.Model;
 using Ainur.Core.Persistence;
@@ -195,8 +196,18 @@ public sealed partial class AinurRuntime : IDisposable {
 
 	public void Dispose() {
 		ExpiryTimer?.Dispose();
-		foreach(var host in Hosts.Values) host.Dispose();
-		foreach(var client in McpClients) client.DisposeAsync().AsTask().Wait(3000);
+		// Closing the browser manager first prevents a session host from starting a new browser during
+		// shutdown. Its disposal is asynchronous (CDP close + process exit) but bounded for sync callers.
+		if(BrowserManager.TryFor(this, out var browsers)) {
+			try { browsers!.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult(); }
+			catch(Exception e) { Console.Error.WriteLine($"Browser shutdown incomplete: {e.Message}"); }
+		}
+		foreach(var host in Hosts.Values) {
+			try { host.Dispose(); } catch(Exception e) { Console.Error.WriteLine($"Session shutdown incomplete: {e.Message}"); }
+		}
+		foreach(var client in McpClients) {
+			try { client.DisposeAsync().AsTask().Wait(3000); } catch(Exception e) { Console.Error.WriteLine($"MCP shutdown incomplete: {e.Message}"); }
+		}
 		Hosts.Clear();
 		Db.Write(u => {
 			u.Execute("UPDATE runtime_generations SET stopped_at=@now, stop_reason='clean' WHERE generation=@Generation", new { now = Clock.Now, Generation });
