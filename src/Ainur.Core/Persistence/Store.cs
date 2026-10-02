@@ -245,8 +245,11 @@ public sealed class Store(Db db) {
 			u.Execute("UPDATE notifications SET state='delivered', delivered_at=@now WHERE id=@id", new { id, now = Clock.Now });
 	}
 
-	public List<ConversationEntry> Conversation(string projectId) => Db.Read(c => c.Query<ConversationEntry>(
-		"SELECT * FROM conversation WHERE project_id=@projectId ORDER BY created_at, rowid", new { projectId }).AsList());
+	public List<ConversationEntry> Conversation(string projectId) => Db.Read(c => {
+		var entries = c.Query<ConversationEntry>("SELECT * FROM conversation WHERE project_id=@projectId ORDER BY created_at, rowid", new { projectId }).AsList();
+		foreach(var entry in entries) entry.Attachments = c.Query<ConversationImage>("SELECT * FROM conversation_images WHERE project_id=@projectId AND conversation_id=@id ORDER BY attachment_order", new { projectId, id = entry.Id }).AsList();
+		return entries;
+	});
 
 	public ConversationEntry AppendConversation(Db.Unit u, string projectId, string author, string? agentId, string body) {
 		var e = new ConversationEntry { Id = Ids.New("cnv"), ProjectId = projectId, Author = author, AgentId = agentId, Body = body, CreatedAt = Clock.Now };

@@ -11,7 +11,7 @@ namespace Ainur.Server;
 public sealed record CreateProjectRequest(string Name, string? Description, string? WorkspacePath, decimal? BudgetDollars, string? ManagerModel, string? ManagerName, bool? NoEffectiveLimit = null, decimal? CashCeilingDollars = null);
 public sealed record UpdateProjectRequest(decimal? BudgetDollars, decimal? CashCeilingDollars, bool? ClearCashCeiling, string? Description, bool? NoEffectiveLimit = null);
 public sealed record SetAgentModelRequest(string? ModelId, string? ReasoningEffort, string? Title, string? ExpectedTitle);
-public sealed record MessageRequest(string Text);
+public sealed record MessageRequest(string? Text, List<string>? AttachmentIds = null, string? ClientMessageId = null);
 public sealed record DrainRequest(int? TimeoutSeconds);
 public sealed record UpgradeOutcome(string AttemptId, string State, string ReleaseId, string? Detail);
 
@@ -148,13 +148,16 @@ public static class Api {
 
 		api.MapGet("/projects/{id}/conversation", (AinurRuntime rt, string id) => rt.Store.Conversation(id));
 		api.MapPost("/projects/{id}/conversation", (AinurRuntime rt, string id, MessageRequest req) => {
-			if(string.IsNullOrWhiteSpace(req.Text)) return Results.BadRequest(new { error = "Empty message" });
 			try {
-				return Results.Json(rt.PostUserMessage(id, req.Text.Trim()));
+				return Results.Json(rt.PostUserMessage(id, req.ClientMessageId is null ? (req.Text ?? "").Trim() : req.Text ?? "", req.AttachmentIds, req.ClientMessageId));
+			} catch(ConversationConflictException e) {
+				return Results.Conflict(new { error = e.Message });
 			} catch(DomainException e) {
 				return Results.BadRequest(new { error = e.Message });
 			}
 		});
+
+		ConversationImageApi.Map(api);
 
 		api.MapGet("/projects/{id}/events", (AinurRuntime rt, string id, long? after, int? limit) => rt.Store.Events(id, after ?? 0, Math.Clamp(limit ?? 300, 1, 2000)));
 		api.MapGet("/projects/{id}/notifications", (AinurRuntime rt, string id) => rt.Store.ListNotifications(id));
