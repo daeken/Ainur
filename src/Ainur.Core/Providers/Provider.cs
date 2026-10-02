@@ -13,6 +13,8 @@ public sealed record ToolCall(string Id, string Name, string Arguments);
 /// can rebuild valid native requests without discarding provider-required content.
 /// </summary>
 public sealed class ChatMessage {
+	/// <summary>Durable source item for image authorization; never provider wire content.</summary>
+	public string? SourceItemId { get; set; }
 	public string Role { get; set; } = "user"; // system | user | assistant | tool
 	public string? Content { get; set; }
 	public string? Reasoning { get; set; }

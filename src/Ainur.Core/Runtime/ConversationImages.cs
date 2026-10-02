@@ -57,12 +57,15 @@ public sealed partial class AinurRuntime {
 	public byte[]? ReadConversationImage(string projectId, string imageId) {
 		var image = Db.Write(u => ScopedImage(u, projectId, imageId));
 		if(image is null) return null;
+		return ReadValidatedConversationImage(image);
+	}
+
+	byte[] ReadValidatedConversationImage(ConversationImage image) {
 		try {
-			var bytes = Artifacts.Get(image.Artifact);
-			if(bytes.LongLength != image.Bytes || ConversationImageValidation.Validate(bytes, image.MimeType) != (image.Width, image.Height))
-				throw new DomainException("Stored image metadata does not match its content.");
+			var bytes = BrowserImageInput.Hydrate(Artifacts, [new ToolImage(image.Artifact, image.MimeType, image.Width, image.Height)])[image.Artifact];
+			if(bytes.LongLength != image.Bytes) throw new DomainException("Stored image metadata does not match its content.");
 			return bytes;
-		} catch(FileNotFoundException) { throw new DomainException("Stored image content is missing."); }
+		} catch(Providers.ProviderException e) { throw new DomainException(e.Message); }
 	}
 
 	public bool RemoveConversationImage(string projectId, string imageId) => Db.Write(u => {
@@ -108,9 +111,7 @@ public sealed partial class AinurRuntime {
 			var images = ids.Select(id => ScopedImage(u, projectId, id) ?? throw new DomainException("Image attachment not found in this project/session or expired.")).ToList();
 			foreach(var image in images) {
 				if(image.ConversationId is not null) throw new ConversationConflictException("Image attachment is already bound to a sent message.");
-				byte[] data;
-				try { data = Artifacts.Get(image.Artifact); } catch(FileNotFoundException) { throw new DomainException("Stored image content is missing."); }
-				if(data.LongLength != image.Bytes || ConversationImageValidation.Validate(data, image.MimeType) != (image.Width, image.Height)) throw new DomainException("Stored image is invalid.");
+				ReadValidatedConversationImage(image);
 			}
 			var conversation = Store.AppendConversation(u, projectId, "user", null, text);
 			conversation.Attachments = images;

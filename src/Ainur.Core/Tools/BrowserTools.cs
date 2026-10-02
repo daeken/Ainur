@@ -18,7 +18,11 @@ public abstract class BrowserTool : BuiltinTool {
 	}
 
 	/// <summary>Stores the frame in the artifact store so it is recorded like any other tool result.</summary>
-	protected static string Publish(ToolContext ctx, BrowserFrame frame) => ctx.Runtime.Artifacts.Put(frame.Png);
+	protected static string Publish(ToolContext ctx, BrowserFrame frame) {
+		if(Runtime.ConversationImageValidation.Validate(frame.Png, "image/png") != (frame.Width, frame.Height))
+			throw new InvalidOperationException("Screenshot dimensions differ from decoded image.");
+		return ctx.Runtime.Artifacts.Put(frame.Png);
+	}
 
 	protected static async Task<ToolResult> Observed(ToolContext ctx, BrowserSession session, BrowserObservation observation, string prefix = "") {
 		var frame = await session.ScreenshotAsync(ct: ctx.CancellationToken).ConfigureAwait(false);

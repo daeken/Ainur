@@ -62,7 +62,7 @@ public class ConversationImageTests {
 		using var home = new TempHome();
 		string projectId, imageId, entryId, sessionId, notificationId;
 		var png = Png();
-		using(var rt = home.Runtime(start: false)) {
+		using(var rt = home.Runtime(start: false)) { rt.Draining = true;
 			var project = rt.CreateProject("images", "", home.Workspace);
 			projectId = project.Id;
 			var other = rt.CreateProject("other", "", home.Workspace);
@@ -87,7 +87,7 @@ public class ConversationImageTests {
 			Assert.DoesNotContain(Convert.ToBase64String(png), JsonUtil.Serialize(rt.Store.Events(projectId)));
 			Assert.DoesNotContain("sha256:", JsonUtil.Serialize(rt.Store.Conversation(projectId)));
 		}
-		using(var reopened = home.Runtime(start: false)) {
+		using(var reopened = home.Runtime(start: false)) { reopened.Draining = true;
 			Assert.Equal(png, reopened.ReadConversationImage(projectId, imageId));
 			Assert.Equal(imageId, Assert.Single(Assert.Single(reopened.Store.Conversation(projectId)).Attachments).Id);
 			Assert.Equal(entryId, reopened.PostUserMessage(projectId, "", [imageId], "same-key").Id);
@@ -97,7 +97,7 @@ public class ConversationImageTests {
 
 	[Fact]
 	public void ExpiredDeletedMissingAndQuotaFailuresNeverPersistMessagesAndRetainQuota() {
-		using var home = new TempHome(); using var rt = home.Runtime(start: false);
+		using var home = new TempHome(); using var rt = home.Runtime(start: false); rt.Draining = true;
 		var p = rt.CreateProject("images", "", home.Workspace); var bytes = Png();
 		var expired = rt.UploadConversationImage(p.Id, bytes, "image/png");
 		rt.Db.Write(u => u.Execute("UPDATE conversation_images SET expires_at=0 WHERE id=@Id", expired));
@@ -120,7 +120,7 @@ public class ConversationImageTests {
 
 	[Fact]
 	public void OrderedAttachmentReplayAndSessionScopeAreStrict() {
-		using var home = new TempHome(); using var rt = home.Runtime(start: false);
+		using var home = new TempHome(); using var rt = home.Runtime(start: false); rt.Draining = true;
 		var p = rt.CreateProject("ordered", "", home.Workspace);
 		var first = rt.UploadConversationImage(p.Id, Png(), "image/png");
 		var second = rt.UploadConversationImage(p.Id, Png(3, 2), "image/png");
@@ -140,7 +140,7 @@ public class ConversationImageTests {
 
 	[Fact]
 	public async Task HttpUploadContentSendReplayDeleteAndLegacyTextContract() {
-		using var home = new TempHome(); using var rt = home.Runtime(start: false);
+		using var home = new TempHome(); using var rt = home.Runtime(start: false); rt.Draining = true;
 		var p = rt.CreateProject("http", "", home.Workspace);
 		var other = rt.CreateProject("other", "", home.Workspace);
 		var builder = WebApplication.CreateBuilder(); builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");

@@ -225,9 +225,23 @@ public sealed class SessionHost : IDisposable {
 		if(session.Kind != "primary") return;
 		var pending = Runtime.Store.PendingNotifications(AgentId);
 		if(pending.Count == 0) return;
-		var text = Runtime.FormatInbox(pending);
+		// Preserve each image-bearing user's message and provenance, rather than merging its pixels
+		// into a mixed agent-notification inbox. Resolve only server-bound conversation references.
+		var deliveries = pending.Select(n => (Notification: n, Images: Runtime.ConversationImagesForNotification(SessionId, n.Id))).ToList();
 		Runtime.Store.Db.Write(u => {
-			Runtime.Store.AppendItem(u, SessionId, ItemKinds.User, new UserPayload { Text = text, NotificationIds = pending.Select(n => n.Id).ToList() }, Tokens.Estimate(text));
+			var textBatch = new List<Notification>();
+			void FlushTextBatch() {
+				if(textBatch.Count == 0) return;
+				var text = Runtime.FormatInbox(textBatch);
+				Runtime.Store.AppendItem(u, SessionId, ItemKinds.User, new UserPayload { Text = text, NotificationIds = textBatch.Select(n => n.Id).ToList() }, Tokens.Estimate(text));
+				textBatch.Clear();
+			}
+			foreach(var (notification, images) in deliveries) {
+				if(images.Count == 0) { textBatch.Add(notification); continue; }
+				FlushTextBatch();
+				Runtime.Store.AppendItem(u, SessionId, ItemKinds.User, new UserPayload { Text = notification.Body, NotificationIds = [notification.Id], Images = images }, Tokens.Estimate(notification.Body) + images.Count * 2048);
+			}
+			FlushTextBatch();
 			Runtime.Store.MarkDelivered(u, pending.Select(n => n.Id));
 		});
 	}
