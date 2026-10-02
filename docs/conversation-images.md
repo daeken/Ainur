@@ -81,6 +81,17 @@ reported no known vulnerable packages during implementation (NuGet advisory feed
 not an independent native security audit). ImageSharp's conditional license was
 considered and rejected; no ImageSharp dependency is retained.
 
+Compressed PNG framing is independently checked with pinned **SharpZipLib 1.4.2**
+(MIT, NuGet package license expression; net6.0 asset has no transitive dependencies).
+The inflater requires zlib end-of-stream, validates Adler-32 and requires no remaining
+compressed input after consecutive IDAT chunks. Concatenated members, truncation,
+bad checksums and trailing compressed payloads are rejected, not canonicalized:
+the artifact hash still addresses the original accepted bytes. Input is capped at
+2 MiB; inflation uses an 8 KiB scratch buffer and at most `width*height*8+height*7`
+output bytes (RGBA16 plus an Adam7 filter-row upper bound), with at most one extra
+buffer decoded to detect excess. Every successful loop makes output progress;
+zero progress before stream-end fails closed. Full Skia decode is still required.
+
 ## Model delivery and bounded history
 
 SessionHost resolves attachments only from the persisted, bound user-message
@@ -103,7 +114,15 @@ browser_screenshot; they are not silently treated as currently visible.
 
 OpenAI Responses sends user uploads as actual user `input_image` parts. Tool images
 are adjacent to their string `function_call_output` with an explicit UNTRUSTED TOOL
-OUTPUT caption. Request artifacts contain redaction markers rather than data URLs.
+OUTPUT caption. For image-bearing requests, raw request/response artifacts and
+provider error diagnostics are fixed omission markers, not provider-controlled JSON,
+SSE, transport text or substrings sanitized by regex. This includes valid escaped,
+split and malformed diagnostic echoes. HTTP status, typed usage, locally generated
+request identifiers and billing-uncertainty classification are preserved. Provider
+model-name/incomplete-reason diagnostic strings are not retained for image requests.
+Ordinary generated assistant text, reasoning, tool arguments and citations remain
+functional model output; they are **not** generally redacted. This is not a guarantee
+that a model cannot deliberately echo image data in its generated content.
 Only OpenAI Responses image routes are supported; unsupported direct routes or any
 unsupported configured fallback fail explicitly before HTTP, not as a text-only
 request. Every actual fallback still requotes under the existing cash admission

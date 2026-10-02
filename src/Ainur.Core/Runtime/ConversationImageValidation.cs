@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using Ainur.Core.Persistence;
 using SkiaSharp;
+using ICSharpCode.SharpZipLib;
+using ICSharpCode.SharpZipLib.Zip.Compression;
 
 namespace Ainur.Core.Runtime;
 
@@ -18,6 +20,8 @@ public static class ConversationImageValidation {
 		// Validate chunk framing and CRCs before the native decoder; reject animation and trailing data.
 		var offset = 8;
 		var ended = false;
+		using var compressed = new MemoryStream();
+		var sawIdat = false; var endedIdat = false;
 		while(offset < data.Length) {
 			if(data.Length - offset < 12) throw new DomainException("Truncated PNG chunk.");
 			var length = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(offset, 4));
@@ -32,6 +36,11 @@ public static class ConversationImageValidation {
 				for(var bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ (0xedb88320u & (uint) -(int) (crc & 1));
 			}
 			if(~crc != BinaryPrimitives.ReadUInt32BigEndian(data.Slice(offset + 8 + (int) length, 4))) throw new DomainException("PNG chunk checksum is invalid.");
+			if(type.SequenceEqual("IDAT"u8)) {
+				if(endedIdat) throw new DomainException("PNG IDAT chunks must be consecutive.");
+				sawIdat = true;
+				compressed.Write(data.Slice(offset + 8, (int) length));
+			} else if(sawIdat) endedIdat = true;
 			offset += (int) length + 12;
 			if(type.SequenceEqual("IEND"u8)) {
 				if(length != 0 || offset != data.Length) throw new DomainException("PNG has trailing data or invalid IEND.");
@@ -43,6 +52,22 @@ public static class ConversationImageValidation {
 		var height = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(20, 4));
 		if(width is < 1 or > MaxDimension || height is < 1 or > MaxDimension || (long) width * height > MaxPixels)
 			throw new DomainException("PNG dimensions exceed 2048 per edge or 3,000,000 decoded pixels.");
+		// SKCodec may ignore bytes after the zlib member. Validate framing independently with
+		// an inflater exposing stream-end AND unused-input (ZLibStream exposes neither).
+		// PNG permits at most RGBA16 (8 bytes/pixel); Adam7 adds <= 7 filter bytes per row.
+		var inflatedLimit = checked((long) width * height * 8 + height * 7);
+		try {
+			var inflater = new Inflater(); // zlib wrapper required, including Adler-32 checksum
+			inflater.SetInput(compressed.ToArray());
+			var buffer = new byte[8192]; long inflated = 0;
+			while(!inflater.IsFinished) {
+				var count = inflater.Inflate(buffer);
+				inflated += count;
+				if(inflated > inflatedLimit) throw new DomainException("PNG inflated pixel stream exceeds its bounded dimensions.");
+				if(count == 0 && !inflater.IsFinished) throw new DomainException("PNG compressed pixel stream is incomplete or requires a dictionary.");
+			}
+			if(inflater.RemainingInput != 0) throw new DomainException("PNG compressed pixel stream has trailing payload.");
+		} catch(SharpZipBaseException) { throw new DomainException("PNG compressed pixel stream or checksum is invalid."); }
 		using var encoded = SKData.CreateCopy(bytes);
 		using var codec = SKCodec.Create(encoded);
 		if(codec is null || codec.EncodedFormat != SKEncodedImageFormat.Png || codec.FrameCount > 1 || codec.Info.Width != width || codec.Info.Height != height)

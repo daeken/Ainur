@@ -271,17 +271,6 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 	static string RedactImageData(string text) => System.Text.RegularExpressions.Regex.Replace(text,
 		@"data:image/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=\r\n]+", "[redacted image data]");
 
-	static JsonObject RedactImages(JsonObject request) {
-		var redacted = (JsonObject) request.DeepClone();
-		if(redacted["input"] is not JsonArray items) return redacted;
-		foreach(var item in items.OfType<JsonObject>()) {
-			if(item["content"] is not JsonArray content) continue;
-			foreach(var part in content.OfType<JsonObject>())
-				if(part["type"]?.GetValue<string>() == "input_image") part["image_url"] = "[image data stored in artifact store]";
-		}
-		return redacted;
-	}
-
 	static JsonObject MessageItem(string role, string textType, string text) => new() {
 		["type"] = "message",
 		["role"] = role,
@@ -304,9 +293,13 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 
 	async Task<ProviderResponse> SendAsync(string endpoint, ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct, Action<HttpRequestMessage> applyHeaders) {
 		var body = BuildRequest(request);
+		// Diagnostics are not model output. For image requests retain no provider-controlled raw
+		// strings/keys at all: JSON escapes, split fields and malformed payloads cannot leak pixels.
+		var omitDiagnostics = request.ImageData.Count > 0;
+		string SafeDiagnostic(string text) => omitDiagnostics ? "[provider diagnostics omitted for image request]" : RedactImageData(text);
 		var wireRequest = body.ToJsonString();
-		// Persist only redacted diagnostic JSON; pixel data stays in the artifact store.
-		var rawRequest = request.ImageData.Count == 0 ? wireRequest : RedactImages(body).ToJsonString();
+		// No raw request/response diagnostics for image requests; typed model output and usage are preserved.
+		var rawRequest = omitDiagnostics ? "[request diagnostics omitted for image request]" : wireRequest;
 		using var msg = new HttpRequestMessage(HttpMethod.Post, endpoint) {
 			Content = new StringContent(wireRequest, Encoding.UTF8, "application/json"),
 		};
@@ -317,13 +310,15 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		try {
 			resp = await http.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead, ct);
 		} catch(HttpRequestException e) {
-			throw new OpenAiFailoverException($"{Id} transport error: {e.Message}");
+			throw new OpenAiFailoverException($"{Id} transport error: {SafeDiagnostic(e.Message)}");
+		} catch(Exception) when(omitDiagnostics) {
+			throw new ProviderException("Image request transport diagnostics omitted; processing status uncertain.", mayHaveBilled: true);
 		}
 		using var _ = resp;
 		if(!resp.IsSuccessStatusCode) {
-			var error = await resp.Content.ReadAsStringAsync(ct);
+			var error = omitDiagnostics ? "" : await resp.Content.ReadAsStringAsync(ct);
 			var status = (int) resp.StatusCode;
-			throw new ProviderException($"{Id} HTTP {status}: {TextUtil.Truncate(RedactImageData(error), 2000)}", status, retryable: status is 429 or >= 500);
+			throw new ProviderException($"{Id} HTTP {status}: {TextUtil.Truncate(SafeDiagnostic(error), 2000)}", status, retryable: status is 429 or >= 500);
 		}
 
 		var result = new ProviderResponse { RawRequest = rawRequest };
@@ -342,7 +337,7 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 				if(!line.StartsWith("data:")) continue;
 				var data = line[5..].Trim();
 				if(data.Length == 0 || data == "[DONE]") continue;
-				raw.Append(RedactImageData(data)).Append('\n');
+				if(!omitDiagnostics) raw.Append(RedactImageData(data)).Append('\n');
 				using var doc = JsonDocument.Parse(data);
 				var root = doc.RootElement;
 				if(!root.TryGetProperty("type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String) continue;
@@ -405,7 +400,7 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 						emittedOutput = true;
 						break;
 					case "response.created":
-						if(root.TryGetProperty("response", out var created) && created.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String)
+						if(!omitDiagnostics && root.TryGetProperty("response", out var created) && created.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String)
 							result.UpstreamModel = model.GetString();
 						break;
 					case "response.completed":
@@ -417,12 +412,12 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 						break;
 					case "response.failed": {
 						var reportedUsage = root.TryGetProperty("response", out var failedResp) && failedResp.TryGetProperty("usage", out var fu) && fu.ValueKind == JsonValueKind.Object;
-						throw new ProviderException($"{Id} response failed: {TextUtil.Truncate(RedactImageData(data), 2000)}", retryable: false, mayHaveBilled: reportedUsage);
+						throw new ProviderException($"{Id} response failed: {TextUtil.Truncate(SafeDiagnostic(data), 2000)}", retryable: false, mayHaveBilled: reportedUsage);
 					}
 					case "error":
 						// A mid-stream error after output was produced cannot be retried (correct), but the request must
 						// not be claimed as definitely unbilled — mirror the truncated-stream classification.
-						throw new ProviderException($"{Id} error event: {TextUtil.Truncate(RedactImageData(data), 2000)}", retryable: false, mayHaveBilled: emittedOutput);
+						throw new ProviderException($"{Id} error event: {TextUtil.Truncate(SafeDiagnostic(data), 2000)}", retryable: false, mayHaveBilled: emittedOutput);
 					default:
 						break;
 				}
@@ -430,7 +425,9 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		} catch(ProviderException) {
 			throw;
 		} catch(Exception e) when(e is IOException or HttpRequestException or JsonException) {
-			throw new ProviderException($"{Id} stream interrupted: {e.Message}", retryable: true, mayHaveBilled: true);
+			throw new ProviderException($"{Id} stream interrupted: {SafeDiagnostic(e.Message)}", retryable: true, mayHaveBilled: true);
+		} catch(Exception) when(omitDiagnostics) {
+			throw new ProviderException("Image request stream diagnostics omitted; processing status uncertain.", mayHaveBilled: true);
 		}
 
 		if(!sawCompleted)
@@ -440,7 +437,7 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		result.Reasoning = reasoning.Length > 0 ? reasoning.ToString() : null;
 		result.ToolCalls = calls.Values.Select((c, i) => new ToolCall(string.IsNullOrEmpty(c.Id) ? $"call_{i}" : c.Id, c.Name, c.Args.Length == 0 ? "{}" : c.Args.ToString())).ToList();
 		result.FinishReason = result.ToolCalls.Count > 0 ? "tool_calls" : "stop";
-		result.RawResponse = raw.ToString();
+		result.RawResponse = omitDiagnostics ? "[response diagnostics omitted for image request]" : raw.ToString();
 		if(!sawUsage) result.Usage = new Usage { Reported = false };
 		return result;
 	}
