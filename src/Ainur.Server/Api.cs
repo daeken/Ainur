@@ -27,6 +27,7 @@ public static class Api {
 		var api = app.MapGroup("/api/v1");
 
 		api.MapGet("/version", (ServerOptions options, AinurRuntime rt) => Results.Json(GetVersionInfo(options, rt)));
+		api.MapGet("/control/route-receipt", (HttpContext ctx, ServerOptions options, AinurRuntime rt) => RouteReceipt.Get(ctx, options, rt));
 
 		api.MapGet("/health", async (AinurRuntime rt) => {
 			// Readiness requires a working database and responsive session dispatchers, not merely a live process.
