@@ -1,6 +1,7 @@
 using System.Text;
 using Ainur.Core.Model;
 using Ainur.Core.Providers;
+using Ainur.Core.Tools;
 
 namespace Ainur.Core.Context;
 
@@ -61,16 +62,24 @@ public static class ContextBuilder {
 		var visible = items.Where(i => i.Seq > view.CutoffSeq && i.Kind != ItemKinds.Summary).OrderBy(i => i.Seq).ToList();
 		var lastUserSeq = visible.LastOrDefault(i => i.Kind is ItemKinds.User or ItemKinds.Notice)?.Seq ?? 0;
 
-		// Only one recent tool image is eligible for model input per request. Earlier pixels are retained
-		// in the artifact store and the tool text explicitly states when visual context is omitted.
+		// Restore the latest uploaded user image message even after text compaction. Older upload
+		// refs remain durable, with visible omission markers; compaction never pretends to see pixels.
+		var latestImageUser = items.Where(i => i.Kind == ItemKinds.User && JsonUtil.Deserialize<UserPayload>(i.Payload)!.Images.Count > 0).MaxBy(i => i.Seq);
+		if(latestImageUser is not null && latestImageUser.Seq <= view.CutoffSeq) {
+			var restored = JsonUtil.Deserialize<UserPayload>(latestImageUser.Payload)!;
+			messages.Add(new ChatMessage { Role = "user", SourceItemId = latestImageUser.Id, Content = "[Latest user image message retained across text compaction]\n" + restored.Text, Images = restored.Images.ToList() });
+		}
+		// One current tool screenshot; user images fill the remaining bounded projection newest first.
 		var visualCandidate = visible.LastOrDefault(i => i.Kind == ItemKinds.ToolResult && i.Seq > lastUserSeq &&
 			!IsElided(i, view, currentTurn, policy) && JsonUtil.Deserialize<ToolResultPayload>(i.Payload)?.Images.Count > 0);
 		for(var idx = 0; idx < visible.Count; idx++) {
 			var item = visible[idx];
 			switch(item.Kind) {
-				case ItemKinds.User:
-					messages.Add(ChatMessage.User(JsonUtil.Deserialize<UserPayload>(item.Payload)!.Text));
+				case ItemKinds.User: {
+					var user = JsonUtil.Deserialize<UserPayload>(item.Payload)!;
+					messages.Add(new ChatMessage { Role = "user", SourceItemId = item.Id, Content = user.Text, Images = user.Images.ToList() });
 					break;
+				}
 				case ItemKinds.Notice:
 					messages.Add(ChatMessage.User("[Runtime notice] " + JsonUtil.Deserialize<NoticePayload>(item.Payload)!.Text));
 					break;
@@ -92,6 +101,13 @@ public static class ContextBuilder {
 			}
 		}
 		FillMissingResults(messages);
+		// Whole user messages (never a partial photo set) are selected newest first. The latest
+		// screenshot has one reserved slot; messages exceeding the four-image projection are explicit.
+		var remainingImages = 4 - messages.Where(m => m.Role == "tool").Sum(m => m.Images.Count);
+		foreach(var message in messages.Where(m => m.Role == "user" && m.Images.Count > 0).Reverse()) {
+			if(message.Images.Count <= remainingImages) remainingImages -= message.Images.Count;
+			else { message.Content += "\n[Older user image pixels omitted by the bounded context projection; durable original attachments remain in conversation history. Re-upload to focus on them.]"; message.Images = []; }
+		}
 
 		var conversationChars = messages.Skip(1).Sum(MessageTokens);
 		var total = (int) Math.Ceiling((MessageTokens(messages[0]) + conversationChars) * tokenRatio);
@@ -120,7 +136,7 @@ public static class ContextBuilder {
 	}
 
 	static void RenderResultBatch(List<SessionItem> batch, List<ChatMessage> messages, ContextViewState view, int currentTurn, ContextPolicy policy, List<string> autoElided, string? visualCandidate) {
-		var rendered = new List<(string CallId, string Text, List<Ainur.Core.Tools.ToolImage> Images)>();
+		var rendered = new List<(string ItemId, string CallId, string Text, List<ToolImage> Images)>();
 		var budgetPer = batch.Count == 0 ? policy.AggregateResultChars : Math.Max(policy.PreviewChars / 2, policy.AggregateResultChars / batch.Count);
 		var batchFull = batch.Select(i => JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!).Sum(p => Math.Min(p.Chars, policy.MaxInlineResultChars)) > policy.AggregateResultChars;
 		foreach(var item in batch) {
@@ -138,10 +154,10 @@ public static class ContextBuilder {
 			if(r.ValueHandle is not null) text += $"\n[live object handle: {r.ValueHandle}]";
 			var attach = item.Id == visualCandidate && !IsElided(item, view, currentTurn, policy) && r.Images.Count > 0;
 			if(r.Images.Count > 0 && !attach) text += "\n[visual content omitted from model input; use browser_screenshot for a fresh view.]";
-			rendered.Add((r.CallId, text, attach ? [r.Images[^1]] : []));
+			rendered.Add((item.Id, r.CallId, text, attach ? [r.Images[^1]] : []));
 		}
-		foreach(var (callId, text, images) in rendered)
-			messages.Add(new ChatMessage { Role = "tool", ToolCallId = callId, Content = text, Images = images });
+		foreach(var (itemId, callId, text, images) in rendered)
+			messages.Add(new ChatMessage { Role = "tool", SourceItemId = itemId, ToolCallId = callId, Content = text, Images = images });
 	}
 
 	public static string ElisionRecord(ToolResultPayload r) =>
@@ -173,7 +189,12 @@ public static class ContextBuilder {
 		foreach(var item in items) {
 			sb.Append($"#{item.Seq} ");
 			switch(item.Kind) {
-				case ItemKinds.User: sb.Append("[user/inbox] ").Append(JsonUtil.Deserialize<UserPayload>(item.Payload)!.Text); break;
+				case ItemKinds.User: {
+					var user = JsonUtil.Deserialize<UserPayload>(item.Payload)!;
+					sb.Append("[user/inbox] ").Append(user.Text);
+					if(user.Images.Count > 0) sb.Append($"\n[{user.Images.Count} user image artifact(s) recorded; pixels not included in this text transcript; do not infer visual content]");
+					break;
+				}
 				case ItemKinds.Notice: sb.Append("[runtime notice] ").Append(JsonUtil.Deserialize<NoticePayload>(item.Payload)!.Text); break;
 				case ItemKinds.Summary: sb.Append("[earlier summary] ").Append(JsonUtil.Deserialize<SummaryPayload>(item.Payload)!.Text); break;
 				case ItemKinds.Assistant: {

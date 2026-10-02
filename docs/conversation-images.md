@@ -81,9 +81,41 @@ reported no known vulnerable packages during implementation (NuGet advisory feed
 not an independent native security audit). ImageSharp's conditional license was
 considered and rejected; no ImageSharp dependency is retained.
 
+## Model delivery and bounded history
+
+SessionHost resolves attachments only from the persisted, bound user-message
+notification, and records typed artifact references on that user item. Image-bearing
+messages are not merged with agent inbox notices. Legacy text-only batches remain
+unchanged. Browser images are recorded on their original tool-result item instead.
+Neither path writes base64 to session history. The gateway requires a matching source
+item in the calling project/session and, for user images, the original conversation
+binding. It verifies hash, full decode and metadata again before dispatch.
+
+A normal request projects at most **four images / 8 MiB**, each at most 2 MiB.
+One current, non-elided tool screenshot after the latest user/notice has priority;
+remaining slots take whole user image messages newest first. Older user messages
+receive an explicit pixel-omission marker, not silent loss. Original references stay
+in history. The latest user image message is restored across text compaction;
+compactor transcripts explicitly say pixels are not included, and text summaries
+must not infer visual content. This prevents the third or later image send from
+permanently exceeding the request cap. Older tool screenshots require a fresh
+browser_screenshot; they are not silently treated as currently visible.
+
+OpenAI Responses sends user uploads as actual user `input_image` parts. Tool images
+are adjacent to their string `function_call_output` with an explicit UNTRUSTED TOOL
+OUTPUT caption. Request artifacts contain redaction markers rather than data URLs.
+Only OpenAI Responses image routes are supported; unsupported direct routes or any
+unsupported configured fallback fail explicitly before HTTP, not as a text-only
+request. Every actual fallback still requotes under the existing cash admission
+boundary; unknown-price API fallback remains blocked by a cash ceiling. Provider
+usage determines settlement; the context estimate budgets 2048 tokens per image.
+
 ## Integration status
 
-Upload/storage/HTTP tests are offline. Context projection, gateway authorization,
-provider wire images, redacted captures, and bounded replay must pass the common
-multimodal integration gate before declaring end-to-end image delivery supported.
-No production deployment or real model proof is authorized by these API tests alone.
+Offline tests cover upload/storage/HTTP, actual SessionHost delivery and browser
+screenshot execution using local Chrome plus scripted model HTTP, request-wire pixels,
+redacted persistence, authorization tampering, history/compaction/restart replay,
+unsupported providers and cash-unknown API fallback. These tests prove plumbing,
+not that a real model understood an image. Independent review, real disposable UI
+acceptance, and a separately authorized model vision proof remain release gates.
+No production deployment or live model proof is authorized by the offline tests.

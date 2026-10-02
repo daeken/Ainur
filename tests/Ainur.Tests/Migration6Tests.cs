@@ -24,7 +24,7 @@ public class Migration6Tests {
 		var path = TempDb();
 		try {
 			var db = new Db(path);
-			Assert.Equal(6, db.SchemaVersion);
+			Assert.Equal(7, db.SchemaVersion);
 			Assert.True(HasFallbackColumn(path));
 
 			var store = new Store(db);
@@ -77,7 +77,7 @@ public class Migration6Tests {
 
 			// Reopen through the real Db: migration 6 runs additively.
 			var db = new Db(path);
-			Assert.Equal(6, db.SchemaVersion);
+			Assert.Equal(7, db.SchemaVersion);
 			Assert.True(HasFallbackColumn(path));
 
 			var store = new Store(db);
