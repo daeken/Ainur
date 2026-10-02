@@ -217,9 +217,9 @@ public static class Api {
 			} catch(OperationCanceledException) { }
 		});
 
-		api.MapPost("/control/drain", async (AinurRuntime rt, DrainRequest? req) => {
-			var drained = await rt.DrainAsync(TimeSpan.FromSeconds(req?.TimeoutSeconds ?? 60));
-			return Results.Json(new { drained, running = rt.LiveHosts.Where(h => h.IsRunning).Select(h => h.SessionId) });
+		api.MapPost("/control/drain", async (AinurRuntime rt, DrainRequest? req, HttpContext ctx) => {
+			var outcome = await rt.DrainWithStatusAsync(TimeSpan.FromSeconds(req?.TimeoutSeconds ?? 60), ctx.RequestAborted);
+			return Results.Json(new { drained = outcome.Drained, running = outcome.Running });
 		});
 		api.MapPost("/control/undrain", (AinurRuntime rt) => { rt.Undrain(); return Results.Ok(); });
 		api.MapPost("/control/upgrade-outcome", (AinurRuntime rt, UpgradeOutcome outcome) => {
