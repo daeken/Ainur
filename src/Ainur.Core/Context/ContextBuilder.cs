@@ -61,6 +61,10 @@ public static class ContextBuilder {
 		var visible = items.Where(i => i.Seq > view.CutoffSeq && i.Kind != ItemKinds.Summary).OrderBy(i => i.Seq).ToList();
 		var lastUserSeq = visible.LastOrDefault(i => i.Kind is ItemKinds.User or ItemKinds.Notice)?.Seq ?? 0;
 
+		// Only one recent tool image is eligible for model input per request. Earlier pixels are retained
+		// in the artifact store and the tool text explicitly states when visual context is omitted.
+		var visualCandidate = visible.LastOrDefault(i => i.Kind == ItemKinds.ToolResult && i.Seq > lastUserSeq &&
+			!IsElided(i, view, currentTurn, policy) && JsonUtil.Deserialize<ToolResultPayload>(i.Payload)?.Images.Count > 0);
 		for(var idx = 0; idx < visible.Count; idx++) {
 			var item = visible[idx];
 			switch(item.Kind) {
@@ -82,7 +86,7 @@ public static class ContextBuilder {
 					var batch = new List<SessionItem>();
 					while(idx < visible.Count && visible[idx].Kind == ItemKinds.ToolResult) batch.Add(visible[idx++]);
 					idx--;
-					RenderResultBatch(batch, messages, view, currentTurn, policy, autoElided);
+					RenderResultBatch(batch, messages, view, currentTurn, policy, autoElided, visualCandidate?.Id);
 					break;
 				}
 			}
@@ -97,8 +101,10 @@ public static class ContextBuilder {
 		};
 	}
 
+	// A lowball text-only estimate would hide a vision request from budget/quota estimation.
+	// Provider-reported usage, not this conservative proxy, always determines actual settlement.
 	public static int MessageTokens(ChatMessage m) =>
-		Tokens.Estimate(m.Content) + Tokens.Estimate(m.Reasoning) + (m.ToolCalls?.Sum(c => Tokens.Estimate(c.Name) + Tokens.Estimate(c.Arguments) + 6) ?? 0) + 4;
+		Tokens.Estimate(m.Content) + Tokens.Estimate(m.Reasoning) + (m.ToolCalls?.Sum(c => Tokens.Estimate(c.Name) + Tokens.Estimate(c.Arguments) + 6) ?? 0) + m.Images.Count * 2048 + 4;
 
 	public static string RenderSummary(SummaryPayload s) =>
 		$"[Context summary — {s.Mode} compaction {s.CompactionId} covering transcript items #{s.CoversFromSeq}–#{s.CoversThroughSeq}. " +
@@ -113,8 +119,8 @@ public static class ContextBuilder {
 		return age >= policy.ElideAfterTurns;
 	}
 
-	static void RenderResultBatch(List<SessionItem> batch, List<ChatMessage> messages, ContextViewState view, int currentTurn, ContextPolicy policy, List<string> autoElided) {
-		var rendered = new List<(string CallId, string Text)>();
+	static void RenderResultBatch(List<SessionItem> batch, List<ChatMessage> messages, ContextViewState view, int currentTurn, ContextPolicy policy, List<string> autoElided, string? visualCandidate) {
+		var rendered = new List<(string CallId, string Text, List<Ainur.Core.Tools.ToolImage> Images)>();
 		var budgetPer = batch.Count == 0 ? policy.AggregateResultChars : Math.Max(policy.PreviewChars / 2, policy.AggregateResultChars / batch.Count);
 		var batchFull = batch.Select(i => JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!).Sum(p => Math.Min(p.Chars, policy.MaxInlineResultChars)) > policy.AggregateResultChars;
 		foreach(var item in batch) {
@@ -130,10 +136,12 @@ public static class ContextBuilder {
 			}
 			if(r.IsError) text = "ERROR: " + text;
 			if(r.ValueHandle is not null) text += $"\n[live object handle: {r.ValueHandle}]";
-			rendered.Add((r.CallId, text));
+			var attach = item.Id == visualCandidate && !IsElided(item, view, currentTurn, policy) && r.Images.Count > 0;
+			if(r.Images.Count > 0 && !attach) text += "\n[visual content omitted from model input; use browser_screenshot for a fresh view.]";
+			rendered.Add((r.CallId, text, attach ? [r.Images[^1]] : []));
 		}
-		foreach(var (callId, text) in rendered)
-			messages.Add(ChatMessage.Tool(callId, text));
+		foreach(var (callId, text, images) in rendered)
+			messages.Add(new ChatMessage { Role = "tool", ToolCallId = callId, Content = text, Images = images });
 	}
 
 	public static string ElisionRecord(ToolResultPayload r) =>
@@ -177,6 +185,7 @@ public static class ContextBuilder {
 				case ItemKinds.ToolResult: {
 					var r = JsonUtil.Deserialize<ToolResultPayload>(item.Payload)!;
 					sb.Append($"[tool result {r.ToolName} invocation={r.InvocationId}{(r.IsError ? " ERROR" : "")}] ").Append(TextUtil.Preview(r.Text, maxResultChars));
+					if(r.Images.Count > 0) sb.Append("\n[image artifact recorded; pixels not included in this text transcript]");
 					break;
 				}
 			}
