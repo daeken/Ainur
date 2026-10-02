@@ -23,24 +23,70 @@ public static class RouteReceipt {
 	};
 
 	[DllImport("libc", SetLastError = true, EntryPoint = "open")]
-	static extern int OpenNoFollow(string path, int flags);
+	static extern int OpenDirectory(string path, int flags);
+	[DllImport("libc", SetLastError = true, EntryPoint = "openat")]
+	static extern int OpenKey(int directory, string name, int flags);
+	[DllImport("libc", SetLastError = true, EntryPoint = "fstat")]
+	static extern int Stat(int descriptor, [Out] byte[] metadata);
+	[DllImport("libc", EntryPoint = "getuid")]
+	static extern uint Uid();
+
+	// Native stat layouts on macOS arm64/x64 and Linux arm64/x64 respectively.
+	// Inspect the *opened* descriptor before any read, including FIFO/special files.
+	static bool OwnedFile(int fd, bool directory, bool assembly = false) {
+		var stat = new byte[256];
+		if(Stat(fd, stat) != 0) return false;
+		var mac = OperatingSystem.IsMacOS();
+		var mode = mac ? BitConverter.ToUInt16(stat, 4) : BitConverter.ToUInt32(stat, 24);
+		var links = mac ? BitConverter.ToUInt16(stat, 6) : BitConverter.ToUInt64(stat, 16);
+		var owner = BitConverter.ToUInt32(stat, mac ? 16 : 28);
+		var kind = mode & 0xF000;
+		return owner == Uid() && kind == (directory ? 0x4000 : 0x8000) && (directory || links == 1) &&
+			(directory ? (mode & 0x3F) == 0 && (mode & 0x1C0) == 0x1C0 :
+				assembly || (mode & 0x1FF) == 0x180);
+	}
+
+	[SupportedOSPlatform("macos")]
+	[SupportedOSPlatform("linux")]
+	static string? CoreHash() {
+		try {
+			// Use the loaded Core assembly, never a request path or release metadata. The controller
+			// separately hashes the pinned release file and compares this receipt with it.
+			var location = typeof(AinurRuntime).Assembly.Location;
+			if(string.IsNullOrEmpty(location)) return null;
+			var mac = OperatingSystem.IsMacOS();
+			var fd = OpenDirectory(location, mac ? 0x100 | 0x4 | 0x1000000 : 0x20000 | 0x800 | 0x80000);
+			if(fd < 0) return null;
+			using var handle = new SafeFileHandle((nint)fd, ownsHandle: true);
+			if(!OwnedFile(fd, directory: false, assembly: true)) return null;
+			using var file = new FileStream(handle, FileAccess.Read);
+			if(file.Length <= 0 || file.Length > 64 * 1024 * 1024) return null;
+			return Convert.ToHexString(SHA256.HashData(file));
+		} catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) {
+			return null;
+		}
+	}
 
 	[SupportedOSPlatform("macos")]
 	[SupportedOSPlatform("linux")]
 	static byte[]? ReadKey(string home) {
-		var path = Path.Combine(home, "supervisor", KeyName);
 		try {
-			var info = new FileInfo(path);
-			if(!info.Exists || info.LinkTarget is not null || info.Attributes.HasFlag(FileAttributes.ReparsePoint) ||
-				info.UnixFileMode != (UnixFileMode.UserRead | UnixFileMode.UserWrite)) return null;
-			// Kernel O_NOFOLLOW prevents a swapped final symlink from being opened.
-			const int oReadOnly = 0;
-			var oNoFollow = OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
-			var descriptor = OpenNoFollow(path, oReadOnly | oNoFollow);
-			if(descriptor < 0) return null;
-			using var handle = new SafeFileHandle((nint)descriptor, ownsHandle: true);
-			using var file = new FileStream(handle, FileAccess.Read);
-			if(file.Length != 65 || File.GetUnixFileMode(file.SafeFileHandle) != (UnixFileMode.UserRead | UnixFileMode.UserWrite)) return null;
+			var mac = OperatingSystem.IsMacOS();
+			// O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC; openat limits final-key lookup to verified parent.
+			var noFollow = mac ? 0x100 : 0x20000;
+			var nonblock = mac ? 0x4 : 0x800;
+			var closeExec = mac ? 0x1000000 : 0x80000;
+			var directory = mac ? 0x100000 : 0x10000;
+			var parentFd = OpenDirectory(Path.Combine(home, "supervisor"), noFollow | nonblock | closeExec | directory);
+			if(parentFd < 0) return null;
+			using var parent = new SafeFileHandle((nint)parentFd, ownsHandle: true);
+			if(!OwnedFile(parentFd, directory: true)) return null;
+			var keyFd = OpenKey(parentFd, KeyName, noFollow | nonblock | closeExec);
+			if(keyFd < 0) return null;
+			using var key = new SafeFileHandle((nint)keyFd, ownsHandle: true);
+			if(!OwnedFile(keyFd, directory: false)) return null;
+			using var file = new FileStream(key, FileAccess.Read);
+			if(file.Length != 65) return null;
 			var text = new byte[65];
 			file.ReadExactly(text);
 			if(text[64] != (byte)'\n') return null;
@@ -58,9 +104,7 @@ public static class RouteReceipt {
 
 	public static IResult Get(HttpContext ctx, ServerOptions options, AinurRuntime runtime, Func<string?>? route = null) {
 		ctx.Response.Headers.CacheControl = "no-store";
-		var key = OperatingSystem.IsMacOS() || OperatingSystem.IsLinux() ? ReadKey(options.Home) : null;
-		if(key is null) return Results.NotFound();
-		// A Host header is not authentication; peer IP and a 256-bit out-of-band capability are required.
+		// A Host header is not authentication; reject untrusted requests before opening even the key path.
 		if(ctx.Connection.RemoteIpAddress is not { } ip || !System.Net.IPAddress.IsLoopback(ip) ||
 			ctx.Request.QueryString.HasValue || ctx.Request.Headers.Authorization.Count != 1)
 			return Results.StatusCode(StatusCodes.Status403Forbidden);
@@ -69,14 +113,19 @@ public static class RouteReceipt {
 			return Results.StatusCode(StatusCodes.Status403Forbidden);
 		var supplied = DecodeKey(value[7..]);
 		if(supplied is null) return Results.StatusCode(StatusCodes.Status403Forbidden);
+		var key = OperatingSystem.IsMacOS() || OperatingSystem.IsLinux() ? ReadKey(options.Home) : null;
+		if(key is null) return Results.NotFound();
 		if(!CryptographicOperations.FixedTimeEquals(key, supplied)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+		var coreHash = OperatingSystem.IsMacOS() || OperatingSystem.IsLinux() ? CoreHash() : null;
+		if(coreHash is null) return Results.NotFound();
 		return Results.Json(new {
 			route_class = RouteClass((route ?? (() => Environment.GetEnvironmentVariable("AINUR_OPENAI_ROUTE")))()),
 			process_id = Environment.ProcessId,
 			process_started_utc = StartedUtc,
 			release = options.Release ?? "dev",
 			generation = runtime.Generation,
-			provider_policy = ProviderPolicy
+			provider_policy = ProviderPolicy,
+			core_sha256 = coreHash
 		});
 	}
 }
