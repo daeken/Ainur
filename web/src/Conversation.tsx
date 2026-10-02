@@ -8,7 +8,7 @@ const MAX_IMAGES = 2
 type DraftImage = { key: string; file: File; url: string; upload?: ConversationImage; state: 'uploading' | 'ready' | 'failed'; error?: string }
 type PendingSend = { text: string; attachment_ids: string[]; client_message_id: string }
 type StoredImage = Omit<DraftImage, 'url'>
-export type StoredDraft = { text: string; images: StoredImage[]; pending?: PendingSend; error?: string }
+export type StoredDraft = { text: string; images: StoredImage[]; pending?: PendingSend; error?: string; owner?: symbol }
 
 /** Accept only the project's own authorized image route, never a remote or data: URL from metadata. */
 function imageUrl(projectId: string, image: ConversationImage): string | undefined {
@@ -21,11 +21,16 @@ export function Conversation(props: { project: Project; agents: Agent[]; tick: n
   // never rebound to a new primary session; they remain inert until the page reloads.
   const sessionId = props.agents.find((agent) => agent.id === props.project.root_agent_id)?.primary_session_id ?? 'unknown'
   const scope = `${props.project.id}:${props.project.root_agent_id}:${sessionId}`
-  const store = (snapshot: StoredDraft) => { props.drafts.set(scope, snapshot) }
-  return <ProjectConversation key={scope} {...props} saved={props.drafts.get(scope)} store={store} />
+  // An earlier mount may finish a request after A → B → A. Only the newest mount
+  // owns this scope's in-memory draft; its token survives in the Map, not storage.
+  const claim = (owner: symbol) => { props.drafts.set(scope, { ...props.drafts.get(scope) ?? { text: '', images: [] }, owner }) }
+  const store = (snapshot: StoredDraft, owner: symbol) => {
+    if (props.drafts.get(scope)?.owner === owner) props.drafts.set(scope, { ...snapshot, owner })
+  }
+  return <ProjectConversation key={scope} {...props} saved={props.drafts.get(scope)} claim={claim} store={store} />
 }
 
-function ProjectConversation({ project, agents, tick, deltas, saved, store }: { project: Project; agents: Agent[]; tick: number; deltas: Record<string, string>; saved?: StoredDraft; store: (draft: StoredDraft) => void }) {
+function ProjectConversation({ project, agents, tick, deltas, saved, claim, store }: { project: Project; agents: Agent[]; tick: number; deltas: Record<string, string>; saved?: StoredDraft; claim: (owner: symbol) => void; store: (draft: StoredDraft, owner: symbol) => void }) {
   // Allocate object URLs after commit: StrictMode can discard a render before effects
   // attach, and render-time allocations would leak on that discarded render.
   const [entries, setEntries] = useState<ConversationEntry[]>([])
@@ -40,6 +45,7 @@ function ProjectConversation({ project, agents, tick, deltas, saved, store }: { 
   const pendingRef = useRef<PendingSend | undefined>(saved?.pending)
   const sendingRef = useRef(false)
   const active = useRef(true)
+  const owner = useRef(Symbol('conversation draft mount'))
   const uploads = useRef(new Map<string, AbortController>())
   const sendController = useRef<AbortController | undefined>(undefined)
   const bottom = useRef<HTMLDivElement>(null)
@@ -48,7 +54,7 @@ function ProjectConversation({ project, agents, tick, deltas, saved, store }: { 
   const locked = sending || !!pendingSend
   const uploading = images.some((image) => image.state === 'uploading')
 
-  const persist = () => store({ text: textRef.current, images: imagesRef.current.map(({ url: _url, ...image }) => image), pending: pendingRef.current, error: errorRef.current })
+  const persist = () => store({ text: textRef.current, images: imagesRef.current.map(({ url: _url, ...image }) => image), pending: pendingRef.current, error: errorRef.current }, owner.current)
   const setDraftImages = (update: (current: DraftImage[]) => DraftImage[]) => {
     const next = update(imagesRef.current)
     imagesRef.current = next
@@ -59,6 +65,7 @@ function ProjectConversation({ project, agents, tick, deltas, saved, store }: { 
   const setDraftError = (next?: string) => { errorRef.current = next; persist(); if (active.current) setError(next) }
   useEffect(() => {
     active.current = true
+    claim(owner.current)
     if (saved?.images.length) {
       imagesRef.current = saved.images.map((image) => ({ ...image, url: URL.createObjectURL(image.file) }))
       setImages(imagesRef.current)
@@ -96,6 +103,9 @@ function ProjectConversation({ project, agents, tick, deltas, saved, store }: { 
     setDraftImages((current) => current.map((image) => image.key === draft.key ? { ...image, state: 'uploading', error: undefined } : image))
     try {
       const uploaded = await api.uploadConversationImage(project.id, draft.file, controller.signal)
+      // An old completion must not change either a newer mount's draft or its quota.
+      // Keep uncertain uploads for explicit retry/cleanup; never DELETE on switch.
+      if (!active.current || controller.signal.aborted) return
       if (!imagesRef.current.some((image) => image.key === draft.key)) {
         // Only explicit removal while mounted can make an upload orphan; switching
         // never deletes an uncertain receipt that the server may have bound.
@@ -109,7 +119,7 @@ function ProjectConversation({ project, agents, tick, deltas, saved, store }: { 
       setDraftImages((current) => current.map((image) => image.key === draft.key ? { ...image, upload: uploaded, state: 'ready' } : image))
       setDraftError(undefined)
     } catch (e) {
-      if (controller.signal.aborted) return
+      if (!active.current || controller.signal.aborted) return
       const message = (e as Error).message
       setDraftImages((current) => current.map((image) => image.key === draft.key ? { ...image, state: 'failed', error: message } : image))
       setDraftError(`Image upload failed: ${message}. Retry the image without losing your draft.`)
@@ -159,10 +169,11 @@ function ProjectConversation({ project, agents, tick, deltas, saved, store }: { 
     sendController.current = controller
     try {
       const receipt = await api.sendConversation(project.id, body, controller.signal)
-      // A response after switching belongs only to the original project AND pending
-      // message. Do not clear a newer draft or a different project's composer.
-      if (pendingRef.current?.client_message_id !== body.client_message_id) return
-      imagesRef.current.forEach((image) => { if (active.current) URL.revokeObjectURL(image.url) })
+      // A stale mount cannot consume a receipt that the new owner must reconcile.
+      // Its immutable pending key survives; an explicit retry resolves the server's
+      // receipt idempotently, without auto-resending or erasing newer edits.
+      if (!active.current || controller.signal.aborted || pendingRef.current?.client_message_id !== body.client_message_id) return
+      imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
       imagesRef.current = []
       textRef.current = ''
       pendingRef.current = undefined
