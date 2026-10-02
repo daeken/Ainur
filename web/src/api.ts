@@ -70,12 +70,22 @@ export interface Objective {
   updated_at: number
 }
 
+export interface ConversationImage {
+  id: string
+  mime_type: 'image/png'
+  width: number
+  height: number
+  bytes: number
+  content_url: string
+}
+
 export interface ConversationEntry {
   id: string
   author: 'user' | 'manager' | 'system'
   agent_id?: string
   body: string
   created_at: number
+  attachments?: ConversationImage[]
 }
 
 export interface JournalEvent {
@@ -145,6 +155,32 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
+  uploadConversationImage: async (projectId: string, file: File, signal?: AbortSignal): Promise<ConversationImage> => {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/conversation/images`, {
+      method: 'POST', headers: { 'Content-Type': 'image/png', 'X-Ainur': '1' }, body: file, signal,
+    })
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`
+      try { const json = await res.json(); if (json.error) message = json.error } catch { /* not JSON */ }
+      throw new Error(message)
+    }
+    return await res.json() as ConversationImage
+  },
+  sendConversation: async (projectId: string, body: { text: string; attachment_ids: string[]; client_message_id: string }, signal?: AbortSignal): Promise<ConversationEntry> => {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/conversation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ainur': '1' }, body: JSON.stringify(body), signal,
+    })
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`
+      try { const json = await res.json(); if (json.error) message = json.error } catch { /* not JSON */ }
+      throw new Error(message)
+    }
+    return await res.json() as ConversationEntry
+  },
+  deleteConversationImage: async (projectId: string, imageId: string): Promise<void> => {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/conversation/images/${encodeURIComponent(imageId)}`, { method: 'DELETE', headers: { 'X-Ainur': '1' } })
+    if (!res.ok) throw new Error(`Image removal failed (${res.status})`)
+  },
   get: <T,>(path: string) => request<T>('GET', path),
   post: <T,>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
   patch: <T,>(path: string, body: unknown) => request<T>('PATCH', path, body),
