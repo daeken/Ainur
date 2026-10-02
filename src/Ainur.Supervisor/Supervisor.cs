@@ -33,8 +33,9 @@ public sealed class SupervisorOptions {
 
 /// <summary>
 /// Mechanical release and recovery logic: selects the active release, holds one runtime at a time, checks readiness,
-/// restarts exited runtimes and performs drain → activate → probation upgrades with automatic rollback.
-/// An unresponsive or stuck *live* child is never killed or replaced: fail closed and await operator recovery.
+/// supervises one runtime lifetime, and performs explicitly requested drain → activate → probation upgrades.
+/// Unexpected child exit, unresponsive/stuck work and failed readiness require operator recovery;
+/// only an explicitly requested upgrade may gracefully stop its failed candidate and start a rollback.
 /// </summary>
 public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDisposable {
 	readonly HttpClient Http = new() { BaseAddress = new Uri($"http://127.0.0.1:{opts.Port}/"), Timeout = TimeSpan.FromSeconds(10) };
@@ -42,6 +43,25 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 	Process? Runtime;
 	string? RunningRelease;
 	bool InterventionRequired;
+
+	// A single-use durable claim survives crashes and launchd KeepAlive restarts.
+	// No automatic deletion: even an empty/partial file blocks new child spawns.
+	// Operator may clear only after independently proving all prior parents/children
+	// exited and the runtime home, route, and ledger are preserved.
+	internal static bool TryClaimSpawnLease(string home) {
+		var path = Path.Combine(home, "supervisor", "spawn-lease.json");
+		Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+		try {
+			using var lease = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+			var data = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new {
+				owner_pid = Environment.ProcessId, created_utc = DateTime.UtcNow.ToString("O"),
+				policy = "single use: never automatically clear after crash, timeout or shutdown",
+			}));
+			lease.Write(data);
+			lease.Flush(flushToDisk: true);
+			return true;
+		} catch(IOException) when(File.Exists(path)) { return false; }
+	}
 
 	/// <summary>Ends the supervision loop; RunAsync requests graceful child stop, never forces it.</summary>
 	public void RequestShutdown() {
@@ -58,6 +78,11 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 
 	public async Task<int> RunAsync() {
 		Http.DefaultRequestHeaders.Add("X-Ainur", "1");
+		if(!TryClaimSpawnLease(opts.Home)) {
+			Log("Existing single-use spawn lease: child start blocked; independent operator recovery required");
+			try { await Task.Delay(Timeout.InfiniteTimeSpan, Cts.Token); } catch(OperationCanceledException) { }
+			return 3;
+		}
 		var state = releases.LoadState();
 		if(state.Active is null && Directory.Exists(releases.Root) && Directory.GetDirectories(releases.Root).Select(Path.GetFileName).Where(d => !state.Failed.Contains(d!)).OrderDescending().FirstOrDefault() is { } newest) {
 			Log($"No active release recorded; selecting newest built release {newest}");
@@ -74,7 +99,6 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			state.Active = id;
 			releases.SaveState(state);
 		}
-		var crashTimes = new List<DateTime>();
 		while(!Cts.IsCancellationRequested) {
 			// Preserve the sole child after an unsafe stop/readiness/health/deadline outcome.
 			// No upgrade, rollback or replacement is permitted until independently recovered.
@@ -83,21 +107,11 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 				continue;
 			}
 			state = releases.LoadState();
-			if(Runtime is null || Runtime.HasExited) {
-				if(Runtime is { HasExited: true }) {
-					Log($"Runtime {RunningRelease} exited with code {Runtime.ExitCode}");
-					crashTimes.Add(DateTime.UtcNow);
-					crashTimes.RemoveAll(t => DateTime.UtcNow - t > TimeSpan.FromMinutes(5));
-					if(crashTimes.Count >= 4 && state.Previous is not null && state.Active != state.Previous) {
-						Log($"Release {state.Active} crashed repeatedly; rolling back to {state.Previous}");
-						state.Failed.Add(state.Active!);
-						(state.Active, state.Previous) = (state.Previous, null);
-						releases.SaveState(state);
-						crashTimes.Clear();
-					}
-					await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(crashTimes.Count, 5))), Cts.Token).ContinueWith(_ => { });
-				if(Cts.IsCancellationRequested) break;
-				}
+			if(Runtime is { HasExited: true }) {
+				RequireIntervention($"Runtime {RunningRelease} exited with code {Runtime.ExitCode}; no automatic restart or rollback");
+				continue;
+			}
+			if(Runtime is null) {
 				if(Cts.IsCancellationRequested) break;
 				StartRuntime(state.Active!);
 				if(!await WaitReadyAsync(opts.ReadyTimeout)) {
@@ -145,16 +159,29 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 	async Task WatchDeadlinesAsync() {
 		var path = Path.Combine(opts.Home, "runtime", "inflight.json");
 		if(Runtime is null || Runtime.HasExited || !File.Exists(path)) return;
-		JsonNode? doc;
-		try { doc = JsonNode.Parse(await File.ReadAllTextAsync(path)); } catch { return; }
-		if(doc?["pid"]?.GetValue<int>() != Runtime.Id) return;
-		var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-		foreach(var entry in doc["in_flight"] as JsonArray ?? []) {
-			var deadline = entry!["deadline_at"]!.GetValue<long>();
-			if(now <= deadline + (long) opts.DeadlineGrace.TotalMilliseconds) continue;
-			var invocation = entry["invocation_id"]!.GetValue<string>();
-			RequireIntervention($"Invocation {invocation} ({entry["tool"]}) exceeded its deadline by {(now - deadline) / 1000}s; child preserved");
-			return;
+		try {
+			var doc = JsonNode.Parse(await File.ReadAllTextAsync(path)) as JsonObject
+				?? throw new JsonException("inflight registry is not an object");
+			var pid = doc["pid"]?.GetValue<int>()
+				?? throw new JsonException("inflight registry has no PID");
+			if(pid != Runtime.Id) {
+				RequireIntervention("inflight registry owner PID differs from child; child preserved");
+				return;
+			}
+			var entries = doc["in_flight"] as JsonArray
+				?? throw new JsonException("inflight registry has no invocation array");
+			var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+			foreach(var value in entries) {
+				var entry = value as JsonObject ?? throw new JsonException("invalid inflight invocation");
+				var deadline = entry["deadline_at"]?.GetValue<long>()
+					?? throw new JsonException("inflight invocation has no deadline");
+				if(now <= deadline + (long) opts.DeadlineGrace.TotalMilliseconds) continue;
+				var invocation = entry["invocation_id"]?.GetValue<string>();
+				RequireIntervention($"Invocation {invocation} ({entry["tool"]}) exceeded its deadline by {(now - deadline) / 1000}s; child preserved");
+				return;
+			}
+		} catch(Exception e) {
+			RequireIntervention($"cannot safely parse inflight registry ({e.GetType().Name}); child preserved");
 		}
 	}
 
