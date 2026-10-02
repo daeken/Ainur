@@ -25,6 +25,7 @@ public static class Api {
 
 	public static void Map(WebApplication app) {
 		var api = app.MapGroup("/api/v1");
+		BrowserApi.Map(api);
 
 		api.MapGet("/version", (ServerOptions options, AinurRuntime rt) => Results.Json(GetVersionInfo(options, rt)));
 
