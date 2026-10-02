@@ -1,0 +1,23 @@
+PASS:normal preserves backup/agents/unknown charges/claim
+PASS:normal selected outcome
+PASS:candidate_route_unknown preserves backup/agents/unknown charges/claim
+PASS:candidate_route_unknown selected outcome
+PASS:foreign_listener stops without blind retry
+PASS:parent_reused stops without blind retry
+PASS:child_reused stops without blind retry
+PASS:consequential_tool stops without blind retry
+PASS:label_disable_failed stops without blind retry
+PASS:orphan_lease stops without blind retry
+PASS:partial_parent_survives stops without blind retry
+PASS:partial_child_survives stops without blind retry
+PASS:rollback_route_unknown stops without blind retry
+PASS:foreign_after_stop stops without blind retry
+PASS:ledger_missing stops without blind retry
+PASS:agent_missing stops without blind retry
+PASS:messages_missing stops without blind retry
+PASS:orphan_new_parent stops without blind retry
+PASS:restarted_parent stops without blind retry
+PASS:stale_http200 stops without blind retry
+PASS:harness contains no live process/DB/network control
+PASS offline model only; neither simulator nor this output is live permission
+exit=0
