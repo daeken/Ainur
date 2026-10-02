@@ -4,8 +4,12 @@ using Ainur.Core.Model;
 
 namespace Ainur.Core.Tools;
 
+/// <summary>Immutable content-addressed image produced by a tool; bytes remain in ArtifactStore, never in transcript text.</summary>
+public sealed record ToolImage(string Artifact, string MimeType, int Width, int Height);
+
 public sealed class ToolResult {
 	public string Text { get; init; } = "";
+	public IReadOnlyList<ToolImage> Images { get; init; } = [];
 	public bool IsError { get; init; }
 	/// <summary>Optional live .NET value. PowerShell pipelines receive it directly; the model sees a handle and summary.</summary>
 	public object? Value { get; init; }
