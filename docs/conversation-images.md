@@ -87,9 +87,14 @@ The inflater requires zlib end-of-stream, validates Adler-32 and requires no rem
 compressed input after consecutive IDAT chunks. Concatenated members, truncation,
 bad checksums and trailing compressed payloads are rejected, not canonicalized:
 the artifact hash still addresses the original accepted bytes. Input is capped at
-2 MiB; inflation uses an 8 KiB scratch buffer and at most `width*height*8+height*7`
-output bytes (RGBA16 plus an Adam7 filter-row upper bound), with at most one extra
-buffer decoded to detect excess. Every successful loop makes output progress;
+2 MiB; inflation uses an 8 KiB scratch buffer and requires the exact scanline length
+from IHDR color type, bit depth and interlace mode. Each nonempty pass contributes
+`rows * (1 + ceil(columns * channels * bitDepth / 8))` bytes: one filter byte per
+row plus byte-rounded packed samples. Adam7 uses all seven passes, skipping passes
+with zero rows or columns. Checked arithmetic rejects both surplus and missing
+inflated bytes, even inside a checksum-valid single zlib member. The existing
+RGBA16/Adam7 upper bound still follows from the dimensions; at most one extra
+buffer is decoded to detect excess. Every successful loop makes output progress;
 zero progress before stream-end fails closed. Full Skia decode is still required.
 
 ## Model delivery and bounded history

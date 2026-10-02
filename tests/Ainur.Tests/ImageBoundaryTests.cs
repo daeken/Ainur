@@ -101,6 +101,55 @@ public sealed class ImageBoundaryTests {
 		Assert.Equal((2000, 1500), ConversationImageValidation.Validate(maxPixels, "image/png"));
 	}
 
+	public static IEnumerable<object[]> PngFormats() {
+		var formats = new (byte Color, byte Depth, int Channels)[] {
+			(0, 1, 1), (0, 2, 1), (0, 4, 1), (0, 8, 1), (0, 16, 1),
+			(2, 8, 3), (2, 16, 3), (3, 1, 1), (3, 2, 1), (3, 4, 1), (3, 8, 1),
+			(4, 8, 2), (4, 16, 2), (6, 8, 4), (6, 16, 4),
+		};
+		foreach(var f in formats)
+			foreach(var interlaced in new[] { false, true })
+				foreach(var dimensions in new[] { (1, 1), (2, 2), (9, 11) })
+					yield return [f.Color, f.Depth, f.Channels, interlaced, dimensions.Item1, dimensions.Item2];
+	}
+
+	[Theory]
+	[MemberData(nameof(PngFormats))]
+	public void ExactScanlineAccountingAcceptsAllPngFormatsAndRejectsBothLengthDirections(byte color, byte depth, int channels, bool interlaced, int width, int height) {
+		// Independent encoder: enumerate the PNG Adam7 pass-number grid pixel by pixel,
+		// rather than copying the production pass-dimension arithmetic.
+		int[,] grid = {
+			{ 1, 6, 4, 6, 2, 6, 4, 6 }, { 7, 7, 7, 7, 7, 7, 7, 7 },
+			{ 5, 6, 5, 6, 5, 6, 5, 6 }, { 7, 7, 7, 7, 7, 7, 7, 7 },
+			{ 3, 6, 4, 6, 3, 6, 4, 6 }, { 7, 7, 7, 7, 7, 7, 7, 7 },
+			{ 5, 6, 5, 6, 5, 6, 5, 6 }, { 7, 7, 7, 7, 7, 7, 7, 7 },
+		};
+		using var scanlines = new MemoryStream();
+		for(var pass = 1; pass <= (interlaced ? 7 : 1); pass++)
+			for(var y = 0; y < height; y++) {
+				var samples = 0;
+				for(var x = 0; x < width; x++) if(!interlaced || grid[y % 8, x % 8] == pass) samples += channels;
+				if(samples > 0) {
+					scanlines.WriteByte(0); // filter None, all-zero samples (palette index 0)
+					scanlines.Write(new byte[(samples * depth + 7) / 8]);
+				}
+			}
+		byte[] Encode(byte[] pixels) {
+			var ihdr = new byte[13]; BinaryPrimitives.WriteInt32BigEndian(ihdr, width); BinaryPrimitives.WriteInt32BigEndian(ihdr.AsSpan(4), height);
+			ihdr[8] = depth; ihdr[9] = color; ihdr[12] = (byte) (interlaced ? 1 : 0);
+			using var png = new MemoryStream(); png.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }); png.Write(Chunk("IHDR", ihdr));
+			if(color == 3) png.Write(Chunk("PLTE", [0, 0, 0]));
+			png.Write(Chunk("IDAT", Compressed(pixels))); png.Write(Chunk("IEND", [])); return png.ToArray();
+		}
+		var exact = scanlines.ToArray();
+		Assert.Equal((width, height), ConversationImageValidation.Validate(Encode(exact), "image/png"));
+		Assert.Throws<DomainException>(() => ConversationImageValidation.Validate(Encode(exact[..^1]), "image/png"));
+		foreach(var extra in new[] { 1, 8 }) {
+			var surplus = new byte[exact.Length + extra]; exact.CopyTo(surplus, 0); Array.Fill(surplus, (byte) 42, exact.Length, extra);
+			Assert.Throws<DomainException>(() => ConversationImageValidation.Validate(Encode(surplus), "image/png"));
+		}
+	}
+
 	static ProviderRequest Request() {
 		var bytes = ConversationImageTests.Png();
 		return new ProviderRequest { Model = ModelCatalog.Seed.Single(m => m.Id == "gpt-6-astra-api"),
