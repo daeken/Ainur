@@ -1,0 +1,43 @@
+{
+  "counts": {
+    "sessions": 7,
+    "reservations": 10,
+    "model_requests": 100,
+    "cost_events": 100,
+    "events": 100,
+    "tool_invocations": 100,
+    "notifications": 50,
+    "messages": 110
+  },
+  "candidate": "r20261002154643-01d6c043e2",
+  "expectedRelease": "r20261002014730-766fa9f930",
+  "home": "/Users/daeken/projects/Ainur/src/Ainur.Server/.ainur/dev",
+  "expectedCoreHash": "787DD2BB636726472F91689957C283851386E2C0B50C85E45A0E643E75DA59A3",
+  "liveApproved": false,
+  "parent": {
+    "started": "P0",
+    "pid": 61760
+  },
+  "agentIds": [
+    "agt_01a0f814b38b794e8b81fe32dea9645d",
+    "agt_01a0fda60697713a9e88d6663da1a104",
+    "agt_01a0f81760187d9bb07007727f53f57c",
+    "agt_01a0f817601b7e2eb485890de912d974",
+    "agt_01a0f8479f287ca88498e5af75232ac0",
+    "agt_01a0f8479f2b7cff9f45a1f36d2ab242",
+    "agt_01a0f8479f2c76b5863328898763faef"
+  ],
+  "label": "gui/501/com.ainur.supervisor.5181",
+  "child": {
+    "started": "C0",
+    "pid": 64728
+  },
+  "port": 5181,
+  "candidateCoreHash": "1CD0AE8D1E2BEE1BCC9DA30C484B04284B73257712BC7C4F737EAF338AF364E3",
+  "oldRoute": "subscription",
+  "detachedOwner": "MOCK ONLY",
+  "riskApproval": "interrupted-turn-and-admission-race-accepted",
+  "adapterHash": "3A2D37DAF8E2BF98F2C1CA8AEDCA360613857EF894386476B74F63D0B0EF6FC6",
+  "supervisorSource": "254065c008e0ef61565971ebccfa11462c262e01",
+  "planVersion": "one-outage-v2"
+}
