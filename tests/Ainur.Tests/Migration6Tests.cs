@@ -24,7 +24,7 @@ public class Migration6Tests {
 		var path = TempDb();
 		try {
 			var db = new Db(path);
-			Assert.Equal(6, db.SchemaVersion);
+			Assert.Equal(7, db.SchemaVersion);
 			Assert.True(HasFallbackColumn(path));
 
 			var store = new Store(db);
@@ -75,9 +75,9 @@ public class Migration6Tests {
 				cost.ExecuteNonQuery();
 			}
 
-			// Reopen through the real Db: migration 6 runs additively.
+			// Reopen through the real Db: migrations 6 (fallback) and 7 (images) run additively.
 			var db = new Db(path);
-			Assert.Equal(6, db.SchemaVersion);
+			Assert.Equal(7, db.SchemaVersion);
 			Assert.True(HasFallbackColumn(path));
 
 			var store = new Store(db);
@@ -102,6 +102,37 @@ public class Migration6Tests {
 		} finally {
 			DbCleanup(path);
 		}
+	}
+
+	[Fact]
+	public void Schema6To7PreservesFallbackPricesHistoryAndLegacyConversationProjection() {
+		var path = TempDb();
+		try {
+			using(var conn = new SqliteConnection($"Data Source={path}")) {
+				conn.Open();
+				foreach(var migration in Migrations.All.Where(m => m.Version <= 6)) conn.Execute(migration.Sql);
+				conn.Execute("PRAGMA user_version=6;");
+				conn.Execute("INSERT INTO models(id,provider,upstream_model,display_name,price_provenance,billing,premium,enabled,notes,fallback_model_id) VALUES('custom','openai','custom','Custom','none','subscription','1',1,'preserve me','custom-api')");
+				conn.Execute("INSERT INTO conversation(id,project_id,author,body,created_at) VALUES('legacy','p','user','old text',1)");
+				conn.Execute("INSERT INTO model_requests(id,project_id,purpose,model_id,provider,upstream_model,state,quote,started_at) VALUES('old','p','test','custom','openai','custom','succeeded','{}',1)");
+				conn.Execute("INSERT INTO cost_events(id,project_id,model_request_id,category,effective_nanos,cash_basis,created_at) VALUES('cost','p','old','direct',123,'subscription',1)");
+			}
+			var db = new Db(path); Assert.Equal(7, db.SchemaVersion);
+			var store = new Store(db);
+			var model = store.GetModel("custom")!;
+			Assert.Equal("custom-api", model.FallbackModelId); Assert.Null(model.InputPerMillion); Assert.True(model.Enabled);
+			Assert.Equal("preserve me", model.Notes);
+			var legacy = Assert.Single(store.Conversation("p"));
+			Assert.Equal("old text", legacy.Body); Assert.Empty(legacy.Attachments);
+			Assert.Equal(123, db.Read(c => c.ExecuteScalar<long>("SELECT effective_nanos FROM cost_events WHERE id='cost'")));
+			Assert.Equal("succeeded", db.Read(c => c.ExecuteScalar<string>("SELECT state FROM model_requests WHERE id='old'")));
+			Assert.Equal(0, db.Read(c => c.ExecuteScalar<int>("SELECT COUNT(*) FROM conversation_images")));
+			Assert.Equal(0, db.Read(c => c.ExecuteScalar<int>("SELECT COUNT(*) FROM conversation_receipts")));
+			// The prior release's legacy SQL remains usable with the additive tables present.
+			db.Write(u => u.Execute("INSERT INTO conversation(id,project_id,author,body,created_at) VALUES('legacy-new','p','user','old-writer text',2)"));
+			Assert.Equal(2, new Store(new Db(path)).Conversation("p").Count);
+			Assert.Equal(7, new Db(path).SchemaVersion); // Reopening does not replay migration 7.
+		} finally { DbCleanup(path); }
 	}
 
 	static void DbCleanup(string path) {

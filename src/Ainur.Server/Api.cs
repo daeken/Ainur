@@ -10,7 +10,7 @@ namespace Ainur.Server;
 
 public sealed record CreateProjectRequest(string Name, string? Description, string? WorkspacePath, decimal? BudgetDollars, string? ManagerModel, string? ManagerName, bool? NoEffectiveLimit = null, decimal? CashCeilingDollars = null);
 public sealed record UpdateProjectRequest(decimal? BudgetDollars, decimal? CashCeilingDollars, bool? ClearCashCeiling, string? Description, bool? NoEffectiveLimit = null);
-public sealed record SetAgentModelRequest(string? ModelId, string? ReasoningEffort);
+public sealed record SetAgentModelRequest(string? ModelId, string? ReasoningEffort, string? Title, string? ExpectedTitle);
 public sealed record MessageRequest(string? Text, List<string>? AttachmentIds = null, string? ClientMessageId = null);
 public sealed record DrainRequest(int? TimeoutSeconds);
 public sealed record UpgradeOutcome(string AttemptId, string State, string ReleaseId, string? Detail);
@@ -110,6 +110,14 @@ public static class Api {
 
 		api.MapPatch("/agents/{id}", (AinurRuntime rt, string id, SetAgentModelRequest req) => {
 			try {
+				// Title changes are a distinct, compare-old metadata operation. Never mix them with
+				// model/session retargeting, which retains its existing request and response shape.
+				if(req.Title is not null || req.ExpectedTitle is not null) {
+					if(req.ModelId is not null || req.ReasoningEffort is not null)
+						throw new DomainException("Change title separately from model and reasoning_effort");
+					var renamed = rt.SetAgentTitle(null, id, req.Title, req.ExpectedTitle);
+					return Results.Json(new { agent_id = renamed.Id, title = renamed.Title, previous_title = req.ExpectedTitle });
+				}
 				var change = rt.SetAgentModel(null, id, req.ModelId, req.ReasoningEffort);
 				return Results.Json(new {
 					agent_id = change.Agent.Id, model_id = change.Agent.ModelId, reasoning_effort = change.Agent.ReasoningEffort,

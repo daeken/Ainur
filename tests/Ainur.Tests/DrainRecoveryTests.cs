@@ -152,6 +152,36 @@ public class DrainRecoveryTests {
 	}
 
 	[Fact]
+	public async Task ImageReceiptSurvivesDrainTitleCasAndOperatorPauseWithoutDuplicateDispatch() {
+		using var home = new TempHome();
+		using var rt = new AinurRuntime(new RuntimeOptions { Home = home.Path, AutoStartHosts = false }, OfflineUiProviders.Create(home.Path));
+		rt.Start("offline-composition-test");
+		Assert.True(await rt.DrainAsync(TimeSpan.Zero));
+		var project = rt.CreateProject("image-drain", "", home.Workspace, managerModelId: "gpt-6-astra", noEffectiveLimit: true, cashCeilingDollars: 50);
+		var agent = rt.Store.GetAgent(project.RootAgentId!)!;
+		var image = rt.UploadConversationImage(project.Id, ConversationImageTests.Png(), "image/png");
+		var receipt = rt.PostUserMessage(project.Id, "", [image.Id], "drained-image");
+		rt.SetAgentTitle(null, agent.Id, "Image operator", agent.Title);
+		Assert.Throws<DomainException>(() => rt.SetAgentTitle(null, agent.Id, "stale", agent.Title));
+		rt.PauseAgent(agent.Id, null, "operator pause after accepted image");
+		// Idempotent replay must not repeat the fresh-message resume/wake side effect.
+		Assert.Equal(receipt.Id, rt.PostUserMessage(project.Id, "", [image.Id], "drained-image").Id);
+		rt.Undrain(); rt.Undrain();
+		await Task.Delay(150);
+		Assert.True(rt.IsPaused(agent.PrimarySessionId!));
+		Assert.Empty(rt.Store.CostEvents(project.Id));
+		Assert.Single(rt.Store.PendingNotifications(agent.Id), n => n.Type == "user_message");
+		rt.ResumeAgent(agent.Id, null);
+		await Wait.Until(() => rt.Store.Conversation(project.Id).Any(m => m.Body.Contains("received 1 image input(s)")) && !rt.GetHost(agent.PrimarySessionId!)!.IsRunning,
+			TimeSpan.FromSeconds(10), "synthetic image reply after undrain");
+		Assert.Equal("Image operator", rt.Store.GetAgent(agent.Id)!.Title);
+		Assert.Single(rt.Store.CostEvents(project.Id));
+		Assert.Equal(0, rt.Ledger.Summary(project.Id).CashKnownNanos);
+		Assert.Empty(rt.Store.PendingNotifications(agent.Id));
+		Assert.Equal(image.Id, Assert.Single(rt.Store.Conversation(project.Id).Single(m => m.Id == receipt.Id).Attachments).Id);
+	}
+
+	[Fact]
 	public async Task UndrainStartsUnpausedHostlessWorkExactlyOnce() {
 		using var home = new TempHome();
 		var provider = new FakeProvider((_, _) => FakeProvider.Text("delivered"));

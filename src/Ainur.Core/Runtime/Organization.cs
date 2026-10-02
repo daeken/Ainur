@@ -160,6 +160,32 @@ public sealed partial class AinurRuntime {
 		return new AgentModelChange { Agent = agent, PreviousModelId = previousModel, PreviousReasoningEffort = previousEffort, SessionsRetargeted = retargeted };
 	}
 
+	/// <summary>Atomically updates plain-text display metadata only. Requires the exact old title so a
+	/// concurrent edit is not overwritten; never decodes HTML entities or changes identity/sessions.</summary>
+	public Agent SetAgentTitle(string? actorId, string agentId, string? title, string? expectedTitle) {
+		if(title is null || expectedTitle is null)
+			throw new DomainException("Both title and expected_title are required");
+		if(string.IsNullOrWhiteSpace(title) || title.Length > 200 || title.Any(char.IsControl))
+			throw new DomainException("Title must be 1-200 non-control characters");
+		return Db.Write(u => {
+			var agent = Store.GetAgent(u, agentId) ?? throw new DomainException($"Unknown agent '{agentId}'");
+			if(actorId is not null) {
+				var actor = Store.GetAgent(u, actorId) ?? throw new DomainException($"Unknown agent '{actorId}'");
+				if(actor.Role != Roles.Manager) throw new DomainException($"Only a manager may change an agent's title; {actor.Name} is a {actor.Role}");
+				if(actor.Id != agent.Id && !Store.IsInSubtree(actor.Id, agent.Id)) throw new DomainException($"{agent.Name} is not in {actor.Name}'s reporting subtree");
+			}
+			if(!string.Equals(agent.Title, expectedTitle, StringComparison.Ordinal))
+				throw new DomainException("Agent title has changed; reload it before editing");
+			if(string.Equals(agent.Title, title, StringComparison.Ordinal)) return agent;
+			agent.Title = title;
+			agent.UpdatedAt = Clock.Now;
+			Store.UpdateAgent(u, agent);
+			u.Journal("agent.updated", agent.ProjectId, "agent", agent.Id, actorId,
+				new { title = new { from = expectedTitle, to = title } });
+			return agent;
+		});
+	}
+
 	Agent InsertAgent(Db.Unit u, string projectId, NewAgent spec, string? actorId) {
 		var now = Clock.Now;
 		var modelId = spec.ModelId ?? (spec.Role == Roles.Manager ? Options.ManagerModelId : Options.SpecialistModelId);

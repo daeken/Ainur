@@ -55,8 +55,9 @@ public class OpenAiProviderTests {
 	static long Now() => NowMs;
 	static long ExpUnix(long deltaSeconds) => NowMs / 1000 + deltaSeconds;
 
-	static ModelInfo Gpt(string id = "gpt-6-astra") => new() { Id = id, Provider = "openai", UpstreamModel = id, Billing = "subscription", Enabled = true };
+	static ModelInfo Gpt(string id = "gpt-6-astra") => new() { Id = id, Provider = "openai", UpstreamModel = id, Billing = "api", Enabled = true };
 	static ProviderRequest Req(params ChatMessage[] messages) => new() { Model = Gpt(), Messages = [.. messages] };
+	static ProviderRequest SubReq(params ChatMessage[] messages) => new() { Model = new ModelInfo { Id = "gpt-6-astra", Provider = "openai", UpstreamModel = "gpt-6-astra", Billing = "subscription", Enabled = true }, Messages = [.. messages] };
 
 	static string Jwt(long expUnixSeconds, string iss = "https://auth.openai.com", string clientId = "app_test", string accountId = "acc_test") {
 		static string B64(string s) => Convert.ToBase64String(Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -234,7 +235,7 @@ public class OpenAiProviderTests {
 			var handler = new ScriptedHandler();
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Sse(Sse(Delta("hi"), Completed(3, 1))));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
-			await provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default);
+			await provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default);
 			var h = handler.Seen.Single().Headers;
 			Assert.Equal("Bearer " + access, h["Authorization"]);
 			Assert.Equal("acc_42", h["chatgpt-account-id"]);
@@ -262,7 +263,7 @@ public class OpenAiProviderTests {
 			}.ToJsonString()));
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Sse(Sse(Delta("ok"), Completed(4, 1))));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
-			var r = await provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default);
+			var r = await provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default);
 			Assert.Equal("ok", r.Content);
 
 			// Refresh happened, then the subscription request used the NEW token.
@@ -282,7 +283,7 @@ public class OpenAiProviderTests {
 	}
 
 	[Fact]
-	public async Task RefreshFailureFallsBackToApiRoute() {
+	public async Task RefreshFailurePreservesFailureWithoutApiDispatch() {
 		var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ainur-auth-" + Guid.NewGuid().ToString("N") + ".json");
 		try {
 			WriteAuth(path, Jwt(ExpUnix(-3600)), refresh: "rt_old"); // expired token
@@ -290,9 +291,9 @@ public class OpenAiProviderTests {
 			handler.Add(m => m.RequestUri!.ToString().EndsWith("/oauth/token"), m => new HttpResponseMessage(HttpStatusCode.InternalServerError));
 			handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(Delta("api answer"), Completed(4, 2))));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => "api-key", codexAuthPath: () => path, routeOverride: "auto", nowMs: Now);
-			var r = await provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default);
-			Assert.Equal("api answer", r.Content);
-			Assert.Contains(handler.Seen, x => x.Uri == ApiEndpoint);
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default));
+			Assert.False(ex.MayHaveBilled);
+			Assert.DoesNotContain(handler.Seen, x => x.Uri == ApiEndpoint);
 			Assert.DoesNotContain(handler.Seen, x => x.Uri == SubscriptionEndpoint);
 		} finally {
 			File.Delete(path);
@@ -300,7 +301,7 @@ public class OpenAiProviderTests {
 	}
 
 	[Fact]
-	public async Task Subscription401FallsBackToApiRoute() {
+	public async Task Subscription401PreservesFailureWithoutApiDispatch() {
 		var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ainur-auth-" + Guid.NewGuid().ToString("N") + ".json");
 		try {
 			WriteAuth(path, Jwt(ExpUnix(3600))); // valid token
@@ -308,16 +309,16 @@ public class OpenAiProviderTests {
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Json("{\"error\":\"unauthorized\"}", HttpStatusCode.Unauthorized));
 			handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(Delta("api answer"), Completed(4, 2))));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => "api-key", codexAuthPath: () => path, routeOverride: "auto", nowMs: Now);
-			var r = await provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default);
-			Assert.Equal("api answer", r.Content);
-			Assert.Contains(handler.Seen, x => x.Uri == ApiEndpoint);
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default));
+			Assert.False(ex.MayHaveBilled);
+			Assert.DoesNotContain(handler.Seen, x => x.Uri == ApiEndpoint);
 		} finally {
 			File.Delete(path);
 		}
 	}
 
 	[Fact]
-	public async Task Subscription429FallsBackToApiRoute() {
+	public async Task Subscription429PreservesFailureWithoutApiDispatch() {
 		var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ainur-auth-" + Guid.NewGuid().ToString("N") + ".json");
 		try {
 			WriteAuth(path, Jwt(ExpUnix(3600)));
@@ -325,9 +326,9 @@ public class OpenAiProviderTests {
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Json("{\"error\":\"rate limited\"}", (HttpStatusCode) 429));
 			handler.Add(m => m.RequestUri!.ToString() == ApiEndpoint, m => ScriptedHandler.Sse(Sse(Delta("api answer"), Completed(4, 2))));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => "api-key", codexAuthPath: () => path, routeOverride: "auto", nowMs: Now);
-			var r = await provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default);
-			Assert.Equal("api answer", r.Content);
-			Assert.Contains(handler.Seen, x => x.Uri == ApiEndpoint);
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default));
+			Assert.False(ex.MayHaveBilled);
+			Assert.DoesNotContain(handler.Seen, x => x.Uri == ApiEndpoint);
 		} finally {
 			File.Delete(path);
 		}
@@ -341,7 +342,7 @@ public class OpenAiProviderTests {
 			var handler = new ScriptedHandler();
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Json("{\"error\":\"unauthorized\"}", HttpStatusCode.Unauthorized));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => "api-key", codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
-			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default));
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default));
 			Assert.Equal(401, ex.Status);
 			Assert.DoesNotContain(handler.Seen, x => x.Uri == ApiEndpoint);
 		} finally {
@@ -388,7 +389,7 @@ public class OpenAiProviderTests {
 			var handler = new ScriptedHandler();
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Sse(Sse(Delta("hi"), Completed(3, 1))));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
-			var r = await provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default);
+			var r = await provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default);
 			// RawRequest/RawResponse are what the gateway persists as artifacts and DB rows; they must never contain token material.
 			Assert.DoesNotContain(access, r.RawRequest);
 			Assert.DoesNotContain("REFRESH-SECRET-999", r.RawRequest);
@@ -408,7 +409,7 @@ public class OpenAiProviderTests {
 			var handler = new ScriptedHandler();
 			handler.Add(m => m.RequestUri!.ToString() == SubscriptionEndpoint, m => ScriptedHandler.Json("{\"error\":\"unauthorized\"}", HttpStatusCode.Unauthorized));
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
-			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default));
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default));
 			Assert.DoesNotContain(access, ex.Message);
 			Assert.DoesNotContain("REFRESH-SECRET-999", ex.Message);
 		} finally {
@@ -467,7 +468,7 @@ public class OpenAiProviderTests {
 			WriteAuth(path, token, refresh: "rt_old");
 			var handler = new ScriptedHandler(); // no /oauth/token rule: refresh cannot succeed anyway
 			var provider = new OpenAiResponsesProvider(new HttpClient(handler), codexAuthPath: () => path, routeOverride: "subscription", nowMs: Now);
-			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(Req(ChatMessage.User("hi")), null, default));
+			var ex = await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(SubReq(ChatMessage.User("hi")), null, default));
 			Assert.Contains("client_id", ex.Message); // the specific diagnostic, not the generic "no usable credential"
 			Assert.DoesNotContain(token, ex.Message);
 			Assert.DoesNotContain("rt_old", ex.Message);

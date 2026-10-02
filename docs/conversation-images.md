@@ -81,9 +81,65 @@ reported no known vulnerable packages during implementation (NuGet advisory feed
 not an independent native security audit). ImageSharp's conditional license was
 considered and rejected; no ImageSharp dependency is retained.
 
+Compressed PNG framing is independently checked with pinned **SharpZipLib 1.4.2**
+(MIT, NuGet package license expression; net6.0 asset has no transitive dependencies).
+The inflater requires zlib end-of-stream, validates Adler-32 and requires no remaining
+compressed input after consecutive IDAT chunks. Concatenated members, truncation,
+bad checksums and trailing compressed payloads are rejected, not canonicalized:
+the artifact hash still addresses the original accepted bytes. Input is capped at
+2 MiB; inflation uses an 8 KiB scratch buffer and requires the exact scanline length
+from IHDR color type, bit depth and interlace mode. Each nonempty pass contributes
+`rows * (1 + ceil(columns * channels * bitDepth / 8))` bytes: one filter byte per
+row plus byte-rounded packed samples. Adam7 uses all seven passes, skipping passes
+with zero rows or columns. Checked arithmetic rejects both surplus and missing
+inflated bytes, even inside a checksum-valid single zlib member. The existing
+RGBA16/Adam7 upper bound still follows from the dimensions; at most one extra
+buffer is decoded to detect excess. Every successful loop makes output progress;
+zero progress before stream-end fails closed. Full Skia decode is still required.
+
+## Model delivery and bounded history
+
+SessionHost resolves attachments only from the persisted, bound user-message
+notification, and records typed artifact references on that user item. Image-bearing
+messages are not merged with agent inbox notices. Legacy text-only batches remain
+unchanged. Browser images are recorded on their original tool-result item instead.
+Neither path writes base64 to session history. The gateway requires a matching source
+item in the calling project/session and, for user images, the original conversation
+binding. It verifies hash, full decode and metadata again before dispatch.
+
+A normal request projects at most **four images / 8 MiB**, each at most 2 MiB.
+One current, non-elided tool screenshot after the latest user/notice has priority;
+remaining slots take whole user image messages newest first. Older user messages
+receive an explicit pixel-omission marker, not silent loss. Original references stay
+in history. The latest user image message is restored across text compaction;
+compactor transcripts explicitly say pixels are not included, and text summaries
+must not infer visual content. This prevents the third or later image send from
+permanently exceeding the request cap. Older tool screenshots require a fresh
+browser_screenshot; they are not silently treated as currently visible.
+
+OpenAI Responses sends user uploads as actual user `input_image` parts. Tool images
+are adjacent to their string `function_call_output` with an explicit UNTRUSTED TOOL
+OUTPUT caption. For image-bearing requests, raw request/response artifacts and
+provider error diagnostics are fixed omission markers, not provider-controlled JSON,
+SSE, transport text or substrings sanitized by regex. This includes valid escaped,
+split and malformed diagnostic echoes. HTTP status, typed usage, locally generated
+request identifiers and billing-uncertainty classification are preserved. Provider
+model-name/incomplete-reason diagnostic strings are not retained for image requests.
+Ordinary generated assistant text, reasoning, tool arguments and citations remain
+functional model output; they are **not** generally redacted. This is not a guarantee
+that a model cannot deliberately echo image data in its generated content.
+Only OpenAI Responses image routes are supported; unsupported direct routes or any
+unsupported configured fallback fail explicitly before HTTP, not as a text-only
+request. Every actual fallback still requotes under the existing cash admission
+boundary; unknown-price API fallback remains blocked by a cash ceiling. Provider
+usage determines settlement; the context estimate budgets 2048 tokens per image.
+
 ## Integration status
 
-Upload/storage/HTTP tests are offline. Context projection, gateway authorization,
-provider wire images, redacted captures, and bounded replay must pass the common
-multimodal integration gate before declaring end-to-end image delivery supported.
-No production deployment or real model proof is authorized by these API tests alone.
+Offline tests cover upload/storage/HTTP, actual SessionHost delivery and browser
+screenshot execution using local Chrome plus scripted model HTTP, request-wire pixels,
+redacted persistence, authorization tampering, history/compaction/restart replay,
+unsupported providers and cash-unknown API fallback. These tests prove plumbing,
+not that a real model understood an image. Independent review, real disposable UI
+acceptance, and a separately authorized model vision proof remain release gates.
+No production deployment or live model proof is authorized by the offline tests.

@@ -45,10 +45,10 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		// never silently strip pixels if the primary provider rejects/does not bill a request.
 		var chain = BuildChain(store.GetModel(call.Model.Id) ?? call.Model);
 		if(images.Count > 0 && chain.Any(m => m.Provider != "openai" || providers.Get(m.Provider) is not OpenAiResponsesProvider))
-			throw new ProviderException("Browser image input requires an OpenAI Responses vision route for primary and fallback; no screenshot was sent or silently dropped.");
+			throw new ProviderException("Image input requires an OpenAI Responses vision route for primary and fallback; no screenshot was sent or silently dropped.");
 		if(images.Count > 0) {
-			if(string.IsNullOrEmpty(call.SessionId)) throw new ProviderException("Browser image input requires an authenticated persisted session.");
-			BrowserImageInput.EnsureAuthorized(store, call.SessionId, call.Messages);
+			if(string.IsNullOrEmpty(call.SessionId)) throw new ProviderException("Image input requires an authenticated persisted session.");
+			BrowserImageInput.EnsureAuthorized(store, call.ProjectId, call.SessionId, call.Messages);
 		}
 		var imageData = images.Count == 0 ? new Dictionary<string, byte[]>() : BrowserImageInput.Hydrate(artifacts, images);
 		var estimate = call.EstimatedInputTokens
@@ -109,6 +109,9 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 
 	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, string effort, IReadOnlyDictionary<string, byte[]> imageData, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
 		var provider = providers.Get(model.Provider);
+		// Models are refreshed between attempts. Recheck after a concurrent catalog change too.
+		if(imageData.Count > 0 && (model.Provider != "openai" || provider is not OpenAiResponsesProvider))
+			throw new ProviderException("Image input requires an OpenAI Responses vision route; no pixels were silently dropped.");
 		var quote = Pricing.Quote(model, estimate, call.MaxOutputTokens);
 		var record = new ModelRequestRecord {
 			Id = requestId, ProjectId = call.ProjectId, SessionId = call.SessionId, AgentId = call.AgentId, ObjectiveId = call.ObjectiveId,

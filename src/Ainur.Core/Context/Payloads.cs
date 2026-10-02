@@ -4,6 +4,7 @@ using Ainur.Core.Tools;
 namespace Ainur.Core.Context;
 
 public sealed class UserPayload {
+	public List<ToolImage> Images { get; set; } = [];
 	public string Text { get; set; } = "";
 	public List<string> NotificationIds { get; set; } = [];
 }
