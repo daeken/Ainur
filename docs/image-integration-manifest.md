@@ -132,3 +132,28 @@ known 50ms `CoordinationTests.ExpiredPauseIsRevokedAndReported` race; that test 
 alone and the final full shipped run passed without excluding it. No lifecycle edits.
 Independent source acceptance, fresh UI composition, live vision and eventual explicit
 composition atop the accepted drain-recovery release remain separate gates.
+
+## Exact inflated scanline accounting follow-up on frozen b0dfa87
+
+Independent review confirmed the diagnostic and after-zlib-member fixes but found
+that a single checksum-valid zlib member could contain extra inflated pixel bytes.
+The previous dimensional bound was safe for resource use but not an exact length
+check; Skia ignores such suffixes. The isolated `.ainur/fix-png-scanlines` correction
+requires the precise PNG scanline length from IHDR using checked arithmetic, all
+15 legal color-type/bit-depth combinations, and all seven Adam7 passes (empty passes
+contribute zero). Both underlength and surplus inflated streams are rejected before
+Skia. No format support was added or removed, no canonicalization, and no provider,
+runtime/lifecycle or accounting behavior changed.
+
+Independent unmodified `ZzImageFollowup` against b0dfa87: 5 passed / 2 failed
+(+1 and +8 inflated-byte cases). After this fix: 7/7 passed. Shipped tests add 90
+valid-format cases (15 formats x ordinary/Adam7 x 1x1, 2x2, 9x11), each also asserting
+rejection for missing one byte and surplus one/eight bytes. Test fixtures enumerate
+an Adam7 pass-number grid independently rather than copying production arithmetic.
+Combined boundary/follow-up run: 106/106 passed; temporary independent source is
+retained outside the worktree in `.ainur/png-scanline-evidence`, not committed.
+Final `dotnet build --nologo -v q`: success, 0 warnings/errors.
+Final `dotnet test --filter 'Category!=Live' --nologo`: 260 passed / 0 failed.
+`git diff --check`: clean. Logs are in `.ainur/png-scanline-evidence`.
+Frozen b0dfa87/478 candidates remain intact. Independent re-review and later explicit
+composition onto the accepted drain-recovery release remain required.
