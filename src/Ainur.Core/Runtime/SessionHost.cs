@@ -60,7 +60,10 @@ public sealed class SessionHost : IDisposable {
 			WakeRequested = false;
 			bool work;
 			try {
-				work = !Runtime.IsPaused(SessionId) && !Runtime.Draining && HasWork();
+				lock(Runtime.AdmissionGate) {
+					work = !Runtime.IsPaused(SessionId) && !Runtime.Draining && HasWork();
+					if(work) Running = true;
+				}
 			} catch(Exception e) {
 				Console.Error.WriteLine($"[session {SessionId}] {e}");
 				work = false;
@@ -76,7 +79,6 @@ public sealed class SessionHost : IDisposable {
 				}
 				continue;
 			}
-			Running = true;
 			try {
 				await RunAsync();
 			} catch(BudgetExhaustedException e) {
@@ -87,8 +89,10 @@ public sealed class SessionHost : IDisposable {
 				Runtime.HandleSessionFailure(this, e);
 				await Task.Delay(TimeSpan.FromSeconds(5));
 			} finally {
-				Running = false;
-				AtBoundary = true;
+				lock(Runtime.AdmissionGate) {
+					Running = false;
+					AtBoundary = true;
+				}
 			}
 		}
 		SetStatus("stopped");

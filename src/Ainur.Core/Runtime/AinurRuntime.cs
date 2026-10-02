@@ -48,6 +48,8 @@ public sealed partial class AinurRuntime : IDisposable {
 	public readonly Watchdog Watchdog;
 	public long Generation { get; private set; }
 	public volatile bool Draining;
+	internal readonly object AdmissionGate = new();
+	long DrainEpoch;
 	readonly ConcurrentDictionary<string, SessionHost> Hosts = new();
 	readonly ConcurrentDictionary<string, int> Failures = new();
 	public event Action<string, StreamDelta>? Delta;
@@ -174,19 +176,51 @@ public sealed partial class AinurRuntime : IDisposable {
 	}
 
 	/// <summary>Stops dispatching new steps and waits for sessions to reach safe boundaries.</summary>
-	public async Task<bool> DrainAsync(TimeSpan timeout) {
-		Draining = true;
-		Db.Write(u => u.Journal("runtime.draining", null, payload: new { timeout_ms = timeout.TotalMilliseconds }));
-		var deadline = DateTime.UtcNow + timeout;
-		while(DateTime.UtcNow < deadline) {
-			if(Hosts.Values.All(h => !h.IsRunning)) return true;
-			await Task.Delay(100);
+	public sealed record DrainOutcome(bool Drained, IReadOnlyList<string> Running);
+
+	public async Task<bool> DrainAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+		(await DrainWithStatusAsync(timeout, cancellationToken)).Drained;
+
+	public async Task<DrainOutcome> DrainWithStatusAsync(TimeSpan timeout, CancellationToken cancellationToken = default) {
+		long epoch;
+		lock(AdmissionGate) {
+			if(Draining) throw new DomainException("A drain is already active; undrain it before starting another.");
+			Draining = true;
+			epoch = ++DrainEpoch;
 		}
-		return Hosts.Values.All(h => !h.IsRunning);
+		var drained = false;
+		try {
+			Db.Write(u => u.Journal("runtime.draining", null, payload: new { timeout_ms = timeout.TotalMilliseconds }));
+			var deadline = DateTime.UtcNow + timeout;
+			while(true) {
+				cancellationToken.ThrowIfCancellationRequested();
+				lock(AdmissionGate) {
+					var running = Hosts.Values.Where(h => h.IsRunning).Select(h => h.SessionId).ToArray();
+					if(epoch != DrainEpoch) return new(false, running); // Explicit undrain superseded this request.
+					if(running.Length == 0) {
+						drained = true;
+						return new(true, running);
+					}
+					if(DateTime.UtcNow >= deadline) return new(false, running);
+				}
+				await Task.Delay(100, cancellationToken);
+			}
+		} finally {
+			if(!drained) ResumeAfterDrain(epoch);
+		}
 	}
 
-	public void Undrain() {
-		Draining = false;
+	public void Undrain() => ResumeAfterDrain(null);
+
+	void ResumeAfterDrain(long? expectedEpoch) {
+		lock(AdmissionGate) {
+			if(expectedEpoch is not null && expectedEpoch != DrainEpoch) return;
+			Draining = false;
+			++DrainEpoch;
+		}
+		// Wake may have been suppressed before a host existed. Reconcile durable work as well as hosts.
+		foreach(var agent in Store.ListLiveAgents())
+			if(agent.PrimarySessionId is { } sessionId && !IsPaused(sessionId)) Wake(agent.Id);
 		foreach(var h in Hosts.Values) h.Wake();
 	}
 
@@ -207,12 +241,15 @@ public sealed partial class AinurRuntime : IDisposable {
 	// ---- Hosts ----
 
 	public SessionHost? GetHost(string sessionId) {
-		if(Hosts.TryGetValue(sessionId, out var h)) return h;
-		var session = Store.GetSession(sessionId);
-		if(session is null || session.State == "finished") return null;
-		var host = Hosts.GetOrAdd(sessionId, _ => new SessionHost(this, session));
-		host.Delta += (sid, d) => Delta?.Invoke(sid, d);
-		return host;
+		lock(AdmissionGate) {
+			if(Hosts.TryGetValue(sessionId, out var h)) return h;
+			var session = Store.GetSession(sessionId);
+			if(session is null || session.State == "finished") return null;
+			var host = new SessionHost(this, session);
+			Hosts[sessionId] = host;
+			host.Delta += (sid, d) => Delta?.Invoke(sid, d);
+			return host;
+		}
 	}
 
 	public IReadOnlyCollection<SessionHost> LiveHosts => Hosts.Values.ToList();
