@@ -96,3 +96,39 @@ restart occurred for this candidate.
   Image eligibility is transport-based, so an upstream model lacking image support can
   still reject explicitly. No automatic conversion or silent text-only downgrade.
 - No release approval is implied by the composition or implementer's offline results.
+
+## Post-review correction on frozen 478b46e (2026-10-02)
+
+Independent review blocked the original candidate on escaped JSON diagnostic echoes
+and trailing compressed IDAT payloads. A separate `.ainur/fix-image-review` worktree
+preserves frozen 478b46e and applies only these fixes plus a test-only UI fixture:
+
+- Image-bearing request diagnostics are now wholly omitted, not regex-sanitized JSON.
+  This includes request/response artifacts, HTTP bodies and stream/transport exception
+  text. Typed usage, status and billing uncertainty remain; ordinary generated model
+  output is intentionally not generally redacted. See conversation-images.md.
+- SharpZipLib 1.4.2's managed zlib inflater proves checksum, stream-end and zero unused
+  input across IDAT chunks before Skia decode. Original byte hashes are retained.
+  NuGet package metadata declares MIT, repository commit
+  `33f64eb0f28cdd2b084cb822fcc224c7c5aba553`; selected net6.0 asset has no dependencies.
+  `dotnet list src/Ainur.Core/Ainur.Core.csproj package --vulnerable --include-transitive`
+  reported no known vulnerable packages using current NuGet advisory sources.
+- `ImageBoundaryTests` adds escaped/split/malformed diagnostic and durable persistence
+  regressions, original generated-content/billing semantics, checksum/truncation/
+  concatenation/every-IDAT-split tests, decompression bomb rejection, near-2-MiB valid
+  input (three validations bounded by 10 seconds) and maximum-pixel decode.
+- `tests/Ainur.Tests/OfflineUiProviders.cs` is an explicitly injected disposable UI
+  fixture, NOT production startup. Every catalog provider is synthetic or fail-closed;
+  Responses uses an in-memory handler with synthetic auth and no external transport.
+  Its accounting rows are synthetic test accounting, not real provider spending.
+
+Evidence: Námo's unmodified four independent tests in temporary
+`ZzIndependentImage.cs` failed 3/passed 1 against frozen 478b46e, then passed 4/4 after
+fixes. The shipped persistence regressions retain those cases without committing
+verifier-owned temporary source. Final shipped suite command:
+`dotnet test --filter 'Category!=Live&FullyQualifiedName!~ZzIndependentImage' --nologo`
+passed 170/170; build passed with 0 warnings/errors. Earlier full-suite runs hit the
+known 50ms `CoordinationTests.ExpiredPauseIsRevokedAndReported` race; that test passed
+alone and the final full shipped run passed without excluding it. No lifecycle edits.
+Independent source acceptance, fresh UI composition, live vision and eventual explicit
+composition atop the accepted drain-recovery release remain separate gates.
