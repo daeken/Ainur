@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, dollars, subscribe, type Agent, type Project } from './api'
-import { Conversation } from './Conversation'
+import { Conversation, type StoredDraft } from './Conversation'
 import { OrgChart } from './OrgChart'
 import { Objectives } from './Objectives'
 import { Costs } from './Costs'
@@ -14,6 +14,9 @@ type Tab = 'conversation' | 'organization' | 'objectives' | 'costs' | 'activity'
 
 export function App() {
   const [projects, setProjects] = useState<Project[]>([])
+  // In-memory project/root/session drafts outlive the conditional Conversation view,
+  // but intentionally do not survive a page reload or expose File bytes to localStorage.
+  const conversationDrafts = useRef(new Map<string, StoredDraft>())
   const [projectId, setProjectId] = useState<string | undefined>(() => localStorage.getItem('ainur.project') ?? undefined)
   const [tab, setTab] = useState<Tab>('conversation')
   const [agents, setAgents] = useState<Agent[]>([])
@@ -95,7 +98,7 @@ export function App() {
               ))}
             </nav>
             <section className="content">
-              {tab === 'conversation' && <Conversation project={project} agents={agents} tick={tick} deltas={deltas} />}
+              {tab === 'conversation' && <Conversation project={project} agents={agents} tick={tick} deltas={deltas} drafts={conversationDrafts.current} />}
               {tab === 'organization' && <OrgChart agents={agents} deltas={deltas} selected={selectedAgent} onSelect={setSelectedAgent} />}
               {tab === 'objectives' && <Objectives project={project} agents={agents} tick={tick} onSelectAgent={(id) => { setSelectedAgent(id); }} />}
               {tab === 'costs' && <Costs project={project} agents={agents} tick={tick} />}

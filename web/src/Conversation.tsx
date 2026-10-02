@@ -7,6 +7,8 @@ const MAX_IMAGES = 2
 
 type DraftImage = { key: string; file: File; url: string; upload?: ConversationImage; state: 'uploading' | 'ready' | 'failed'; error?: string }
 type PendingSend = { text: string; attachment_ids: string[]; client_message_id: string }
+type StoredImage = Omit<DraftImage, 'url'>
+export type StoredDraft = { text: string; images: StoredImage[]; pending?: PendingSend; error?: string }
 
 /** Accept only the project's own authorized image route, never a remote or data: URL from metadata. */
 function imageUrl(projectId: string, image: ConversationImage): string | undefined {
@@ -14,21 +16,28 @@ function imageUrl(projectId: string, image: ConversationImage): string | undefin
   return image.content_url === expected ? expected : undefined
 }
 
-export function Conversation(props: { project: Project; agents: Agent[]; tick: number; deltas: Record<string, string> }) {
-  // Remounting a project draft keeps attachment IDs, in-flight requests and object URLs from
-  // ever crossing a project boundary. The child aborts and revokes all of them on unmount.
-  return <ProjectConversation key={props.project.id} {...props} />
+export function Conversation(props: { project: Project; agents: Agent[]; tick: number; deltas: Record<string, string>; drafts: Map<string, StoredDraft> }) {
+  // App owns this in-memory map ABOVE the conditional project view. Old sessions are
+  // never rebound to a new primary session; they remain inert until the page reloads.
+  const sessionId = props.agents.find((agent) => agent.id === props.project.root_agent_id)?.primary_session_id ?? 'unknown'
+  const scope = `${props.project.id}:${props.project.root_agent_id}:${sessionId}`
+  const store = (snapshot: StoredDraft) => { props.drafts.set(scope, snapshot) }
+  return <ProjectConversation key={scope} {...props} saved={props.drafts.get(scope)} store={store} />
 }
 
-function ProjectConversation({ project, agents, tick, deltas }: { project: Project; agents: Agent[]; tick: number; deltas: Record<string, string> }) {
+function ProjectConversation({ project, agents, tick, deltas, saved, store }: { project: Project; agents: Agent[]; tick: number; deltas: Record<string, string>; saved?: StoredDraft; store: (draft: StoredDraft) => void }) {
+  // Allocate object URLs after commit: StrictMode can discard a render before effects
+  // attach, and render-time allocations would leak on that discarded render.
   const [entries, setEntries] = useState<ConversationEntry[]>([])
-  const [text, setText] = useState('')
+  const [text, setText] = useState(saved?.text ?? '')
+  const textRef = useRef(saved?.text ?? '')
   const [images, setImages] = useState<DraftImage[]>([])
   const imagesRef = useRef<DraftImage[]>([])
-  const [error, setError] = useState<string>()
+  const [error, setError] = useState<string | undefined>(saved?.error)
+  const errorRef = useRef(saved?.error)
   const [sending, setSending] = useState(false)
-  const [pendingSend, setPendingSend] = useState<PendingSend>()
-  const pendingRef = useRef<PendingSend | undefined>(undefined)
+  const [pendingSend, setPendingSend] = useState<PendingSend | undefined>(saved?.pending)
+  const pendingRef = useRef<PendingSend | undefined>(saved?.pending)
   const sendingRef = useRef(false)
   const active = useRef(true)
   const uploads = useRef(new Map<string, AbortController>())
@@ -39,24 +48,35 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
   const locked = sending || !!pendingSend
   const uploading = images.some((image) => image.state === 'uploading')
 
+  const persist = () => store({ text: textRef.current, images: imagesRef.current.map(({ url: _url, ...image }) => image), pending: pendingRef.current, error: errorRef.current })
   const setDraftImages = (update: (current: DraftImage[]) => DraftImage[]) => {
     const next = update(imagesRef.current)
     imagesRef.current = next
+    persist()
     if (active.current) setImages(next)
   }
+  const setDraftText = (next: string) => { textRef.current = next; persist(); if (active.current) setText(next) }
+  const setDraftError = (next?: string) => { errorRef.current = next; persist(); if (active.current) setError(next) }
   useEffect(() => {
     active.current = true
+    if (saved?.images.length) {
+      imagesRef.current = saved.images.map((image) => ({ ...image, url: URL.createObjectURL(image.file) }))
+      setImages(imagesRef.current)
+      persist()
+    }
     return () => {
       active.current = false
       sendController.current?.abort()
       uploads.current.forEach((controller) => controller.abort())
-      imagesRef.current.forEach((image) => {
-        URL.revokeObjectURL(image.url)
-        // Leaving a project abandons its unsent draft: release server-side uploads as
-        // well as local blobs. A lost receipt can still consume the documented quota.
-        if (image.upload && !pendingRef.current) void api.deleteConversationImage(project.id, image.upload.id).catch(() => {})
-      })
+      // Abort/unknown upload receipts become retryable Files, not possibly-bound DELETEs.
+      // A lost send receipt keeps its exact key/payload until explicitly confirmed.
+      imagesRef.current = imagesRef.current.map((image) => image.state === 'uploading'
+        ? { ...image, state: 'failed', error: 'Upload interrupted by project switch' } : image)
+      persist()
+      imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
     }
+    // This view is keyed by project/root/session; cleanup and URLs are mount-owned.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id])
   useEffect(() => {
     let current = true
@@ -65,7 +85,7 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
       // A poll may have started before a successful send. Never let a stale history
       // response erase its confirmed receipt while the next poll is still pending.
       setEntries((existing) => [...items, ...existing.filter((entry) => !items.some((item) => item.id === entry.id))])
-    }).catch((e) => { if (current) setError((e as Error).message) })
+    }).catch((e) => { if (current) setDraftError((e as Error).message) })
     return () => { current = false }
   }, [project.id, tick])
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }) }, [entries.length])
@@ -76,23 +96,23 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
     setDraftImages((current) => current.map((image) => image.key === draft.key ? { ...image, state: 'uploading', error: undefined } : image))
     try {
       const uploaded = await api.uploadConversationImage(project.id, draft.file, controller.signal)
-      if (!active.current || !imagesRef.current.some((image) => image.key === draft.key)) {
-        // An upload may have committed before a local removal/abort. Reclaim it when its
-        // receipt still arrives; server quota can remain if a response is lost entirely.
-        void api.deleteConversationImage(project.id, uploaded.id).catch(() => {})
+      if (!imagesRef.current.some((image) => image.key === draft.key)) {
+        // Only explicit removal while mounted can make an upload orphan; switching
+        // never deletes an uncertain receipt that the server may have bound.
+        if (active.current) void api.deleteConversationImage(project.id, uploaded.id).catch(() => {})
         return
       }
       if (!imageUrl(project.id, uploaded)) {
-        void api.deleteConversationImage(project.id, uploaded.id).catch(() => {})
+        if (!pendingRef.current) void api.deleteConversationImage(project.id, uploaded.id).catch(() => {})
         throw new Error('Upload returned an invalid project image URL')
       }
       setDraftImages((current) => current.map((image) => image.key === draft.key ? { ...image, upload: uploaded, state: 'ready' } : image))
-      setError(undefined)
+      setDraftError(undefined)
     } catch (e) {
-      if (controller.signal.aborted || !active.current) return
+      if (controller.signal.aborted) return
       const message = (e as Error).message
       setDraftImages((current) => current.map((image) => image.key === draft.key ? { ...image, state: 'failed', error: message } : image))
-      setError(`Image upload failed: ${message}. Retry the image without losing your draft.`)
+      setDraftError(`Image upload failed: ${message}. Retry the image without losing your draft.`)
     } finally {
       uploads.current.delete(draft.key)
     }
@@ -102,10 +122,10 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
     const files = Array.from(event.target.files ?? [])
     event.target.value = '' // selecting the same file again must work after removal
     if (locked) return
-    if (files.length + imagesRef.current.length > MAX_IMAGES) { setError(`Choose at most ${MAX_IMAGES} PNG images per message.`); return }
+    if (files.length + imagesRef.current.length > MAX_IMAGES) { setDraftError(`Choose at most ${MAX_IMAGES} PNG images per message.`); return }
     const invalid = files.find((file) => file.type !== 'image/png' || file.size > MAX_IMAGE_BYTES || file.size === 0)
-    if (invalid) { setError(`${invalid.name}: choose a PNG image no larger than 2 MiB (non-empty).`); return }
-    setError(undefined)
+    if (invalid) { setDraftError(`${invalid.name}: choose a PNG image no larger than 2 MiB (non-empty).`); return }
+    setDraftError(undefined)
     const staged = files.map((file) => ({ key: crypto.randomUUID(), file, url: URL.createObjectURL(file), state: 'uploading' as const }))
     setDraftImages((current) => [...current, ...staged])
     staged.forEach((image) => { void upload(image) })
@@ -116,7 +136,7 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
     setDraftImages((current) => current.filter((item) => item.key !== image.key))
     URL.revokeObjectURL(image.url)
     if (image.upload) void api.deleteConversationImage(project.id, image.upload.id).catch(() => {
-      if (active.current) setError('Image removed from draft, but server cleanup failed. Retained upload quota may still be used.')
+      if (active.current) setDraftError('Image removed from draft, but server cleanup failed. Retained upload quota may still be used.')
     })
   }
 
@@ -124,34 +144,42 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
     event?.preventDefault()
     if (sendingRef.current || uploading) return
     const failed = imagesRef.current.find((image) => image.state !== 'ready' || !image.upload)
-    if (failed) { setError('Retry or remove failed image uploads before sending.'); return }
-    const body = pendingRef.current ?? { text: text.trim(), attachment_ids: imagesRef.current.map((image) => image.upload!.id), client_message_id: crypto.randomUUID() }
+    if (failed) { setDraftError('Retry or remove failed image uploads before sending.'); return }
+    const body = pendingRef.current ?? { text: textRef.current.trim(), attachment_ids: imagesRef.current.map((image) => image.upload!.id), client_message_id: crypto.randomUUID() }
     if (!body.text && body.attachment_ids.length === 0) return
     // On failed/lost-response retries, reuse the *exact* body and key. Lock all draft edits
     // until success, avoiding a server 409 or an accidental duplicate dispatch.
     pendingRef.current = body
+    persist()
     setPendingSend(body)
     sendingRef.current = true
     setSending(true)
-    setError(undefined)
+    setDraftError(undefined)
     const controller = new AbortController()
     sendController.current = controller
     try {
       const receipt = await api.sendConversation(project.id, body, controller.signal)
+      // A response after switching belongs only to the original project AND pending
+      // message. Do not clear a newer draft or a different project's composer.
+      if (pendingRef.current?.client_message_id !== body.client_message_id) return
+      imagesRef.current.forEach((image) => { if (active.current) URL.revokeObjectURL(image.url) })
+      imagesRef.current = []
+      textRef.current = ''
+      pendingRef.current = undefined
+      errorRef.current = undefined
+      persist()
       if (!active.current) return
       setEntries((current) => current.some((item) => item.id === receipt.id) ? current : [...current, receipt])
-      imagesRef.current.forEach((image) => URL.revokeObjectURL(image.url))
-      imagesRef.current = []
       setImages([])
       setText('')
-      pendingRef.current = undefined
       setPendingSend(undefined)
+      setError(undefined)
       // A failed history refresh must never turn a successful send back into a retryable draft.
       void api.get<ConversationEntry[]>(`/projects/${project.id}/conversation`).then((items) => {
         if (active.current) setEntries((existing) => [...items, ...existing.filter((entry) => !items.some((item) => item.id === entry.id))])
       }).catch(() => {})
     } catch (e) {
-      if (active.current && !controller.signal.aborted) setError(`Message not confirmed: ${(e as Error).message}. Retry uses the same message ID; your draft is intact.`)
+      if (active.current && !controller.signal.aborted) setDraftError(`Message not confirmed: ${(e as Error).message}. Retry uses the same message ID; your draft is intact.`)
     } finally {
       sendingRef.current = false
       if (active.current) setSending(false)
@@ -179,7 +207,7 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
         <div ref={bottom} />
       </div>
       <form className="composer" onSubmit={send}>
-        <textarea value={text} disabled={locked} onChange={(event) => setText(event.target.value)} placeholder={`Message ${root?.name ?? 'the manager'}…`}
+        <textarea value={text} disabled={locked} onChange={(event) => setDraftText(event.target.value)} placeholder={`Message ${root?.name ?? 'the manager'}…`}
           onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send() } }} rows={3} />
         {!!images.length && <div className="draft-images">{images.map((image) => (
           <div className="draft-image" key={image.key}>
@@ -192,7 +220,7 @@ function ProjectConversation({ project, agents, tick, deltas }: { project: Proje
         <div className="composer-actions">
           <label className="image-picker">Attach PNG (max 2, 2 MiB each)<input ref={fileInput} type="file" accept="image/png,.png" multiple disabled={locked || images.length >= MAX_IMAGES} onChange={selectImages} /></label>
           {error && <span className="error" role="alert">{error}</span>}
-          <span className="muted small">⌘↩ to send</span>
+          <span className="muted small">⌘↩ to send · Unsent drafts exist only in this tab; reloading loses them.</span>
           <button disabled={sending || uploading || (!pendingSend && !text.trim() && images.length === 0)}>{sending ? 'Sending…' : pendingSend ? 'Retry send' : 'Send'}</button>
         </div>
       </form>
