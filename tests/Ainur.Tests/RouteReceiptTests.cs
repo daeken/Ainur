@@ -1,4 +1,5 @@
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -9,6 +10,10 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Ainur.Tests;
 
 public class RouteReceiptTests {
+	[DllImport("libc", SetLastError = true, EntryPoint = "mkfifo")]
+	static extern int MakeFifo(string path, uint permissions);
+	[DllImport("libc", SetLastError = true, EntryPoint = "link")]
+	static extern int MakeHardLink(string existing, string newPath);
 	static readonly string KeyHex = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
 
 	static async Task<(int Status, string Body, string? Cache)> Get(TempHome home, string? header, string? query = null,
@@ -27,7 +32,9 @@ public class RouteReceiptTests {
 	[SupportedOSPlatform("macos")]
 	[SupportedOSPlatform("linux")]
 	static void Key(TempHome home, string? contents = null, UnixFileMode mode = UnixFileMode.UserRead | UnixFileMode.UserWrite) {
-		Directory.CreateDirectory(Path.Combine(home.Path, "supervisor"));
+		var parent = Path.Combine(home.Path, "supervisor");
+		Directory.CreateDirectory(parent);
+		File.SetUnixFileMode(parent, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 		var key = Path.Combine(home.Path, "supervisor", "route-receipt.key");
 		File.WriteAllText(key, contents ?? KeyHex + "\n");
 		File.SetUnixFileMode(key, mode);
@@ -46,12 +53,14 @@ public class RouteReceiptTests {
 			Assert.Equal(200, status);
 			Assert.Equal("no-store", cache);
 			using var json = JsonDocument.Parse(body);
-			Assert.Equal(new[] { "route_class", "process_id", "process_started_utc", "release", "generation", "provider_policy" },
+			Assert.Equal(new[] { "route_class", "process_id", "process_started_utc", "release", "generation", "provider_policy", "core_sha256" },
 				json.RootElement.EnumerateObject().Select(p => p.Name).ToArray());
 			Assert.Equal(expected, json.RootElement.GetProperty("route_class").GetString());
 			Assert.Equal(Environment.ProcessId, json.RootElement.GetProperty("process_id").GetInt32());
 			Assert.Equal("test-release", json.RootElement.GetProperty("release").GetString());
 			Assert.Equal(RouteReceipt.ProviderPolicy, json.RootElement.GetProperty("provider_policy").GetString());
+			Assert.Equal(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(typeof(Ainur.Core.Runtime.AinurRuntime).Assembly.Location))),
+				json.RootElement.GetProperty("core_sha256").GetString());
 			Assert.DoesNotContain(KeyHex, body, StringComparison.OrdinalIgnoreCase);
 			Assert.DoesNotContain("unexpected-sensitive-input", body, StringComparison.OrdinalIgnoreCase);
 		}
@@ -71,6 +80,31 @@ public class RouteReceiptTests {
 		var original = Path.Combine(home.Path, "supervisor", "original.key");
 		File.Move(key, original);
 		File.CreateSymbolicLink(key, original);
+		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
+	}
+
+	[Fact]
+	public async Task AdversarialFifoAndHardlinkAndParentSymlinkFailClosedWithoutBlocking() {
+		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+		using var home = new TempHome();
+		Key(home);
+		var parent = Path.Combine(home.Path, "supervisor");
+		var key = Path.Combine(parent, "route-receipt.key");
+		File.Delete(key);
+		Assert.Equal(0, MakeFifo(key, 0x180));
+		File.SetUnixFileMode(key, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+		var fifoGet = Get(home, "Bearer " + KeyHex);
+		var finished = await Task.WhenAny(fifoGet, Task.Delay(TimeSpan.FromMilliseconds(600)));
+		Assert.Same(fifoGet, finished); // No FIFO writer; a blocking open hangs here.
+		Assert.Equal(404, (await fifoGet).Status);
+		Assert.Equal(403, (await Get(home, null)).Status); // Malformed bearer must not touch FIFO.
+		File.Delete(key);
+		Key(home);
+		Assert.Equal(0, MakeHardLink(key, Path.Combine(parent, "second-link")));
+		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
+		File.Delete(Path.Combine(parent, "second-link"));
+		Directory.Move(parent, Path.Combine(home.Path, "real-supervisor"));
+		Directory.CreateSymbolicLink(parent, Path.Combine(home.Path, "real-supervisor"));
 		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
 	}
 
