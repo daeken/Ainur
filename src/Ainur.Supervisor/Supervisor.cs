@@ -102,9 +102,10 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 				StartRuntime(state.Active!);
 				if(!await WaitReadyAsync(opts.ReadyTimeout)) {
 					Log($"Runtime {state.Active} did not become ready; requesting graceful stop only");
-					if(!await StopRuntimeAsync(TimeSpan.FromSeconds(5))) {
-						RequireIntervention("runtime failed readiness and did not exit after graceful stop; no replacement");
-					}
+					var stopped = await StopRuntimeAsync(TimeSpan.FromSeconds(5));
+					RequireIntervention(stopped
+						? "runtime failed readiness and exited voluntarily; no blind retry"
+						: "runtime failed readiness and did not exit after graceful stop; no replacement");
 					continue;
 				}
 				Log($"Runtime {state.Active} ready");
