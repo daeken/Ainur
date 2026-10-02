@@ -27,7 +27,10 @@ public abstract class BrowserTool : BuiltinTool {
 		if(prefix.Length > 0) text.AppendLine(prefix);
 		text.Append(BrowserSession.FormatObservation(observation));
 		text.AppendLine().AppendLine($"screenshot artifact: {reference} ({frame.Width}x{frame.Height} png)");
-		return ToolResult.Ok(text.ToString().TrimEnd(), new { observation.Url, observation.Title, Artifact = reference, Elements = observation.Elements }, $"browser: {observation.Title} {observation.Url}");
+		return new ToolResult {
+			Text = text.ToString().TrimEnd(), Value = new { observation.Url, observation.Title, Artifact = reference, Elements = observation.Elements },
+			Description = $"browser: {observation.Title} {observation.Url}", Images = [new ToolImage(reference, "image/png", frame.Width, frame.Height)],
+		};
 	}
 }
 
@@ -157,7 +160,10 @@ public sealed class BrowserScreenshotTool : BrowserTool {
 		var text = new StringBuilder()
 			.AppendLine($"screenshot artifact: {reference} ({frame.Width}x{frame.Height} png)")
 			.Append(BrowserSession.FormatObservation(observation));
-		return ToolResult.Ok(text.ToString().TrimEnd(), new { observation.Url, observation.Title, Artifact = reference }, $"browser screenshot {observation.Title}");
+		return new ToolResult {
+			Text = text.ToString().TrimEnd(), Value = new { observation.Url, observation.Title, Artifact = reference },
+			Description = $"browser screenshot {observation.Title}", Images = [new ToolImage(reference, "image/png", frame.Width, frame.Height)],
+		};
 	}
 }
 

@@ -13,6 +13,8 @@ public sealed class ChatCompletionsProvider(string id, HttpClient http, Func<str
 	public string Id => id;
 
 	public JsonObject BuildRequest(ProviderRequest request) {
+		if(request.Messages.Any(m => m.Images.Count > 0))
+			throw new ProviderException($"{id} does not support Ainur browser image input; switch to a vision-capable OpenAI Responses model. No image was silently discarded.");
 		var messages = new JsonArray();
 		foreach(var m in request.Messages) {
 			var msg = new JsonObject { ["role"] = m.Role };

@@ -1,4 +1,5 @@
 using Ainur.Core.Providers;
+using Ainur.Core.Tools;
 
 namespace Ainur.Core.Context;
 
@@ -28,6 +29,8 @@ public sealed class ToolResultPayload {
 	public int Chars { get; set; }
 	public string? Description { get; set; }
 	public string? ValueHandle { get; set; }
+	/// <summary>Typed, authorized image artifact references; no binary or base64 is written into the transcript.</summary>
+	public List<ToolImage> Images { get; set; } = [];
 }
 
 public sealed class SummaryPayload {

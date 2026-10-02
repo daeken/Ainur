@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Ainur.Core.Model;
+using Ainur.Core.Tools;
 
 namespace Ainur.Core.Providers;
 
@@ -17,6 +18,8 @@ public sealed class ChatMessage {
 	public string? Reasoning { get; set; }
 	public List<ToolCall>? ToolCalls { get; set; }
 	public string? ToolCallId { get; set; }
+	/// <summary>Artifact-backed images, carried in durable context by reference; Data is hydrated only at gateway dispatch.</summary>
+	public List<ToolImage> Images { get; set; } = [];
 
 	public static ChatMessage System(string text) => new() { Role = "system", Content = text };
 	public static ChatMessage User(string text) => new() { Role = "user", Content = text };
@@ -33,6 +36,8 @@ public sealed class ProviderRequest {
 	public string? ToolChoice { get; init; }
 	/// <summary>Opt in to native OpenAI web search; retrieved pages count toward reported input usage.</summary>
 	public bool EnableWebSearch { get; init; }
+	/// <summary>Validated image bytes keyed by authorized artifact ref. Volatile; never write to model_request records.</summary>
+	public IReadOnlyDictionary<string, byte[]> ImageData { get; init; } = new Dictionary<string, byte[]>();
 }
 
 public sealed class Usage {

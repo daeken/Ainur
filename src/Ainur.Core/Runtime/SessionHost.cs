@@ -249,7 +249,7 @@ public sealed class SessionHost : IDisposable {
 		var payload = new ToolResultPayload {
 			CallId = call.Id, ToolName = call.Name, ToolVersion = tool?.Version ?? "unknown", InvocationId = invocation.Id,
 			IsError = result.IsError, Text = result.Text, Artifact = invocation.ResultArtifact, Chars = result.Text.Length,
-			Description = result.Description, ValueHandle = handle,
+			Description = result.Description, ValueHandle = handle, Images = result.Images.ToList(),
 		};
 		Runtime.Store.Db.Write(u => Runtime.Store.AppendItem(u, SessionId, ItemKinds.ToolResult, payload, Tokens.Estimate(TextUtil.Truncate(result.Text, 24_000)) + 10));
 	}

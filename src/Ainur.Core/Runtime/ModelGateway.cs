@@ -40,10 +40,20 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		// below-floor efforts before quoting, reservations, journals, or provider side effects; explicit
 		// set_agent_model with medium/high/max is the supported repair path for such an agent.
 		var effort = AinurRuntime.ResolveReasoningEffort(call.ReasoningEffort);
+		var images = call.Messages.SelectMany(m => m.Images).ToList();
+		// Preflight every fallback before reservation or network dispatch. A non-vision fallback may
+		// never silently strip pixels if the primary provider rejects/does not bill a request.
+		var chain = BuildChain(store.GetModel(call.Model.Id) ?? call.Model);
+		if(images.Count > 0 && chain.Any(m => m.Provider != "openai" || providers.Get(m.Provider) is not OpenAiResponsesProvider))
+			throw new ProviderException("Browser image input requires an OpenAI Responses vision route for primary and fallback; no screenshot was sent or silently dropped.");
+		if(images.Count > 0) {
+			if(string.IsNullOrEmpty(call.SessionId)) throw new ProviderException("Browser image input requires an authenticated persisted session.");
+			BrowserImageInput.EnsureAuthorized(store, call.SessionId, call.Messages);
+		}
+		var imageData = images.Count == 0 ? new Dictionary<string, byte[]>() : BrowserImageInput.Hydrate(artifacts, images);
 		var estimate = call.EstimatedInputTokens
 			?? call.Messages.Sum(Context.ContextBuilder.MessageTokens)
 			+ call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
-		var chain = BuildChain(store.GetModel(call.Model.Id) ?? call.Model);
 		for(var i = 0; i < chain.Count; i++) {
 			var model = store.GetModel(chain[i].Id) ?? chain[i];
 			if(!model.Enabled)
@@ -52,7 +62,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 			Action<StreamDelta> onDelta = d => { emitted = true; call.OnDelta?.Invoke(d); };
 			var requestId = Ids.New("req");
 			try {
-				return await AttemptAsync(call, model, requestId, estimate, effort, onDelta, () => emitted, ct);
+				return await AttemptAsync(call, model, requestId, estimate, effort, imageData, onDelta, () => emitted, ct);
 			} catch(Exception e) {
 				var cause = FailoverClass(e);
 				if(i + 1 < chain.Count && !emitted && cause is not null) {
@@ -97,7 +107,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		return pe.Retryable ? "unavailable" : null;
 	}
 
-	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, string effort, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
+	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, string effort, IReadOnlyDictionary<string, byte[]> imageData, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
 		var provider = providers.Get(model.Provider);
 		var quote = Pricing.Quote(model, estimate, call.MaxOutputTokens);
 		var record = new ModelRequestRecord {
@@ -107,6 +117,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		};
 		var request = new ProviderRequest {
 			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = effort, EnableWebSearch = call.EnableWebSearch,
+			ImageData = imageData,
 		};
 		// Intent and reservation commit before dispatch so a crash leaves evidence of a possibly-billed request.
 		store.Db.Write(u => {
