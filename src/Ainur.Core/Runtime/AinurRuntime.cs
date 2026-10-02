@@ -369,20 +369,7 @@ public sealed partial class AinurRuntime : IDisposable {
 		return n;
 	}
 
-	public ConversationEntry PostUserMessage(string projectId, string text) {
-		var project = Store.GetProject(projectId) ?? throw new DomainException($"Unknown project {projectId}");
-		var root = project.RootAgentId ?? throw new DomainException("Project has no root manager");
-		var entry = Db.Write(u => {
-			var e = Store.AppendConversation(u, projectId, "user", null, text);
-			Store.InsertNotification(u, NewNotification(projectId, NotificationTypes.UserMessage, null, root, text, null, e.Id, $"conv:{e.Id}"));
-			return e;
-		});
-		var rootAgent = Store.GetAgent(root)!;
-		// A user message is direction: it resumes a paused root manager.
-		if(rootAgent.State == AgentStates.Paused) ResumeAgent(root, null);
-		Wake(root);
-		return entry;
-	}
+	public ConversationEntry PostUserMessage(string projectId, string text) => PostUserMessage(projectId, text, null, null);
 
 	public string FormatInbox(List<Notification> pending) {
 		var sb = new StringBuilder("[Inbox]\n");

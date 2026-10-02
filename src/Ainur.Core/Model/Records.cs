@@ -181,10 +181,27 @@ public sealed class Notification {
 	public long? DeliveredAt { get; set; }
 }
 
+public sealed class ConversationImage {
+	public string Id { get; set; } = "";
+	public string ProjectId { get; set; } = "";
+	public string SessionId { get; set; } = "";
+	[System.Text.Json.Serialization.JsonIgnore] public string Artifact { get; set; } = "";
+	public string MimeType { get; set; } = "image/png";
+	public int Width { get; set; }
+	public int Height { get; set; }
+	public long Bytes { get; set; }
+	public long CreatedAt { get; set; }
+	public long ExpiresAt { get; set; }
+	public string? ConversationId { get; set; }
+	public long? DeletedAt { get; set; }
+	public string ContentUrl => $"/api/v1/projects/{ProjectId}/conversation/images/{Id}/content";
+}
+
 public sealed class ConversationEntry {
 	public string Id { get; set; } = "";
 	public string ProjectId { get; set; } = "";
 	public string Author { get; set; } = "";
+	public List<ConversationImage> Attachments { get; set; } = [];
 	public string? AgentId { get; set; }
 	public string Body { get; set; } = "";
 	public long CreatedAt { get; set; }

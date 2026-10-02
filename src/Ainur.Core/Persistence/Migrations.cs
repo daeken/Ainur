@@ -383,5 +383,20 @@ public static class Migrations {
 			-- Model-level fallback: when a request fails without billing, the gateway retries this model (its own row + quote).
 			ALTER TABLE models ADD COLUMN fallback_model_id TEXT;
 			"""),
+		(7, "conversation_images", """
+			CREATE TABLE conversation_images (
+				id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+				session_id TEXT NOT NULL REFERENCES sessions(id), artifact TEXT NOT NULL,
+				mime_type TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
+				bytes INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+				conversation_id TEXT REFERENCES conversation(id), attachment_order INTEGER, deleted_at INTEGER
+			);
+			CREATE INDEX conversation_images_scope ON conversation_images(project_id, conversation_id);
+			CREATE TABLE conversation_receipts (
+				project_id TEXT NOT NULL REFERENCES projects(id), client_message_id TEXT NOT NULL,
+				fingerprint TEXT NOT NULL, conversation_id TEXT NOT NULL REFERENCES conversation(id),
+				PRIMARY KEY(project_id,client_message_id)
+			);
+			"""),
 	];
 }
