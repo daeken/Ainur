@@ -42,6 +42,7 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 	readonly CancellationTokenSource Cts = new();
 	Process? Runtime;
 	string? RunningRelease;
+	long? RunningGeneration;
 	bool InterventionRequired;
 
 	// A single-use durable claim survives crashes and launchd KeepAlive restarts.
@@ -206,13 +207,55 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		psi.Environment["AINUR_SUPERVISED"] = "1";
 		Runtime = Process.Start(psi)!;
 		RunningRelease = releaseId;
+		RunningGeneration = null;
 		Log($"Started runtime {releaseId} (pid {Runtime.Id})");
+	}
+
+	// Readiness must belong to the child we actually started, not any old process serving :port.
+	// Exact release+generation are tied to the child and its independently observed listener PID.
+	internal static bool ReadyForOwnedListener(int expectedPid, int port, bool httpReady, string? expectedRelease,
+		string? actualRelease, long healthGeneration, long versionGeneration, long? priorGeneration, Func<int, int, bool> ownsListener) =>
+		httpReady && expectedPid > 0 && port > 0 && !string.IsNullOrEmpty(expectedRelease) &&
+		string.Equals(expectedRelease, actualRelease, StringComparison.Ordinal) && healthGeneration > 0 &&
+		healthGeneration == versionGeneration && (!priorGeneration.HasValue || healthGeneration == priorGeneration.Value) &&
+		ownsListener(expectedPid, port);
+
+	// lsof -F emits p<pid>, f<fd>, n<socket-name> records, never human-readable TCP/LISTEN prose.
+	// The lsof command itself filters -a -p childPid -iTCP:port -sTCP:LISTEN.
+	internal static bool ListenerRecordsContain(int childPid, int port, string records) {
+		var lines = records.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+		return lines.Count(l => l == "p" + childPid) == 1 &&
+			lines.Any(l => l == "n127.0.0.1:" + port || l == "n*:" + port);
+	}
+
+	internal static bool OwnsListeningPort(int childPid, int port) {
+		try {
+			using var probe = new Process { StartInfo = new ProcessStartInfo("/usr/sbin/lsof") {
+				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+				ArgumentList = { "-nP", "-a", "-p", childPid.ToString(), "-iTCP:" + port, "-sTCP:LISTEN", "-F", "pfn" },
+			} };
+			if(!probe.Start()) return false;
+			if(!probe.WaitForExit(3000)) return false; // never kill any process (including the read-only probe)
+			return probe.ExitCode == 0 && ListenerRecordsContain(childPid, port, probe.StandardOutput.ReadToEnd());
+		} catch { return false; }
 	}
 
 	async Task<bool> IsReadyAsync() {
 		try {
-			var r = await Http.GetAsync("api/v1/health");
-			return r.IsSuccessStatusCode;
+			if(Runtime is not { HasExited: false } child) return false;
+			using var health = await Http.GetAsync("api/v1/health");
+			if(!health.IsSuccessStatusCode) return false;
+			using var version = await Http.GetAsync("api/v1/version");
+			if(!version.IsSuccessStatusCode) return false;
+			using var h = JsonDocument.Parse(await health.Content.ReadAsStringAsync());
+			using var v = JsonDocument.Parse(await version.Content.ReadAsStringAsync());
+			if(!h.RootElement.TryGetProperty("generation", out var hg) || !hg.TryGetInt64(out var healthGen) ||
+				!v.RootElement.TryGetProperty("generation", out var vg) || !vg.TryGetInt64(out var versionGen) ||
+				!v.RootElement.TryGetProperty("release", out var release) || release.ValueKind != JsonValueKind.String) return false;
+			var ready = ReadyForOwnedListener(child.Id, opts.Port, true, RunningRelease,
+				release.GetString(), healthGen, versionGen, RunningGeneration, OwnsListeningPort);
+			if(ready && RunningGeneration is null) RunningGeneration = healthGen;
+			return ready && Runtime == child && !child.HasExited;
 		} catch {
 			return false;
 		}
