@@ -32,10 +32,13 @@ public class RouteReceiptTests {
 	[SupportedOSPlatform("macos")]
 	[SupportedOSPlatform("linux")]
 	static void Key(TempHome home, string? contents = null, UnixFileMode mode = UnixFileMode.UserRead | UnixFileMode.UserWrite) {
-		var parent = Path.Combine(home.Path, "supervisor");
+		var supervisor = Path.Combine(home.Path, "supervisor");
+		var parent = Path.Combine(supervisor, "receipt-secrets");
 		Directory.CreateDirectory(parent);
+		File.SetUnixFileMode(home.Path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		File.SetUnixFileMode(supervisor, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
 		File.SetUnixFileMode(parent, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-		var key = Path.Combine(home.Path, "supervisor", "route-receipt.key");
+		var key = Path.Combine(parent, "route-receipt.key");
 		File.WriteAllText(key, contents ?? KeyHex + "\n");
 		File.SetUnixFileMode(key, mode);
 	}
@@ -76,8 +79,8 @@ public class RouteReceiptTests {
 		Key(home, mode: UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead);
 		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
 		Key(home);
-		var key = Path.Combine(home.Path, "supervisor", "route-receipt.key");
-		var original = Path.Combine(home.Path, "supervisor", "original.key");
+		var key = Path.Combine(home.Path, "supervisor", "receipt-secrets", "route-receipt.key");
+		var original = Path.Combine(home.Path, "supervisor", "receipt-secrets", "original.key");
 		File.Move(key, original);
 		File.CreateSymbolicLink(key, original);
 		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
@@ -88,7 +91,7 @@ public class RouteReceiptTests {
 		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
 		using var home = new TempHome();
 		Key(home);
-		var parent = Path.Combine(home.Path, "supervisor");
+		var parent = Path.Combine(home.Path, "supervisor", "receipt-secrets");
 		var key = Path.Combine(parent, "route-receipt.key");
 		File.Delete(key);
 		Assert.Equal(0, MakeFifo(key, 0x180));
@@ -103,8 +106,31 @@ public class RouteReceiptTests {
 		Assert.Equal(0, MakeHardLink(key, Path.Combine(parent, "second-link")));
 		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
 		File.Delete(Path.Combine(parent, "second-link"));
-		Directory.Move(parent, Path.Combine(home.Path, "real-supervisor"));
-		Directory.CreateSymbolicLink(parent, Path.Combine(home.Path, "real-supervisor"));
+		Directory.Move(parent, Path.Combine(home.Path, "real-secrets"));
+		Directory.CreateSymbolicLink(parent, Path.Combine(home.Path, "real-secrets"));
+		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
+		Directory.Delete(parent);
+		Directory.Move(Path.Combine(home.Path, "real-secrets"), parent);
+		var supervisor = Path.Combine(home.Path, "supervisor");
+		Directory.Move(supervisor, Path.Combine(home.Path, "real-supervisor"));
+		Directory.CreateSymbolicLink(supervisor, Path.Combine(home.Path, "real-supervisor"));
+		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
+	}
+
+	[Fact]
+	public async Task DeniesWorldWritableSupervisorOrSecretsAndWrongOwnershipOrPath() {
+		if(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return;
+		using var home = new TempHome();
+		Key(home);
+		var supervisor = Path.Combine(home.Path, "supervisor");
+		var secrets = Path.Combine(supervisor, "receipt-secrets");
+		File.SetUnixFileMode(supervisor, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupWrite);
+		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
+		File.SetUnixFileMode(supervisor, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+		File.SetUnixFileMode(secrets, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.OtherWrite);
+		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
+		File.SetUnixFileMode(secrets, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+		File.SetUnixFileMode(home.Path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupWrite);
 		Assert.Equal(404, (await Get(home, "Bearer " + KeyHex)).Status);
 	}
 
