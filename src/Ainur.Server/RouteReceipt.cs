@@ -33,7 +33,7 @@ public static class RouteReceipt {
 
 	// Native stat layouts on macOS arm64/x64 and Linux arm64/x64 respectively.
 	// Inspect the *opened* descriptor before any read, including FIFO/special files.
-	static bool OwnedFile(int fd, bool directory, bool assembly = false) {
+	static bool OwnedFile(int fd, bool directory, bool assembly = false, bool publicDirectory = false) {
 		var stat = new byte[256];
 		if(Stat(fd, stat) != 0) return false;
 		var mac = OperatingSystem.IsMacOS();
@@ -42,7 +42,8 @@ public static class RouteReceipt {
 		var owner = BitConverter.ToUInt32(stat, mac ? 16 : 28);
 		var kind = mode & 0xF000;
 		return owner == Uid() && kind == (directory ? 0x4000 : 0x8000) && (directory || links == 1) &&
-			(directory ? (mode & 0x3F) == 0 && (mode & 0x1C0) == 0x1C0 :
+			(directory ? (mode & 0x1C0) == 0x1C0 &&
+				(publicDirectory ? (mode & 0x12) == 0 : (mode & 0x3F) == 0) :
 				assembly || (mode & 0x1FF) == 0x180);
 	}
 
@@ -77,11 +78,21 @@ public static class RouteReceipt {
 			var nonblock = mac ? 0x4 : 0x800;
 			var closeExec = mac ? 0x1000000 : 0x80000;
 			var directory = mac ? 0x100000 : 0x10000;
-			var parentFd = OpenDirectory(Path.Combine(home, "supervisor"), noFollow | nonblock | closeExec | directory);
-			if(parentFd < 0) return null;
-			using var parent = new SafeFileHandle((nint)parentFd, ownsHandle: true);
-			if(!OwnedFile(parentFd, directory: true)) return null;
-			var keyFd = OpenKey(parentFd, KeyName, noFollow | nonblock | closeExec);
+			// Open each component relative to the previous verified descriptor; no intermediate
+			// symlink or permissive supervisor/secret directory can redirect key lookup.
+			var homeFd = OpenDirectory(home, noFollow | nonblock | closeExec | directory);
+			if(homeFd < 0) return null;
+			using var homeHandle = new SafeFileHandle((nint)homeFd, ownsHandle: true);
+			if(!OwnedFile(homeFd, directory: true, publicDirectory: true)) return null;
+			var supervisorFd = OpenKey(homeFd, "supervisor", noFollow | nonblock | closeExec | directory);
+			if(supervisorFd < 0) return null;
+			using var supervisorHandle = new SafeFileHandle((nint)supervisorFd, ownsHandle: true);
+			if(!OwnedFile(supervisorFd, directory: true, publicDirectory: true)) return null;
+			var secretFd = OpenKey(supervisorFd, "receipt-secrets", noFollow | nonblock | closeExec | directory);
+			if(secretFd < 0) return null;
+			using var secretHandle = new SafeFileHandle((nint)secretFd, ownsHandle: true);
+			if(!OwnedFile(secretFd, directory: true)) return null;
+			var keyFd = OpenKey(secretFd, KeyName, noFollow | nonblock | closeExec);
 			if(keyFd < 0) return null;
 			using var key = new SafeFileHandle((nint)keyFd, ownsHandle: true);
 			if(!OwnedFile(keyFd, directory: false)) return null;
