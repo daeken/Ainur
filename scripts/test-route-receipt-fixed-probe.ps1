@@ -11,6 +11,12 @@ $coreHash = (Get-FileHash $core -Algorithm SHA256).Hash
 $server = Join-Path $fixture 'Ainur.Server.dll'
 [IO.File]::WriteAllText($server,'offline dummy server assembly',[Text.UTF8Encoding]::new($false))
 $serverHash = (Get-FileHash $server -Algorithm SHA256).Hash
+$fixtureWeb = Join-Path $fixture 'wwwroot'
+[IO.Directory]::CreateDirectory((Join-Path $fixtureWeb 'assets')) | Out-Null
+$fixtureIndex = '<!doctype html><html><head><title>Ainur</title><script src="/assets/index-valid.js"></script><link href="/assets/index-valid.css" rel="stylesheet"></head><body><div id="root"></div></body></html>'
+[IO.File]::WriteAllText((Join-Path $fixtureWeb 'index.html'),$fixtureIndex,[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $fixtureWeb 'assets/index-valid.js'),'console.log("fixture-only")',[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText((Join-Path $fixtureWeb 'assets/index-valid.css'),'body{color:black}',[Text.UTF8Encoding]::new($false))
 $dummy = Join-Path $fixture 'dummy'
 $script = @'
 #!/usr/bin/env python3
@@ -61,6 +67,19 @@ class Handler(BaseHTTPRequestHandler):
    payload={'release':release,'generation':8,'schema':6}
   elif self.path=='/api/v1/control/route-receipt' and self.headers.get('Authorization')=='Bearer '+key:
    payload={'route_class':'api' if mode=='bad-route' else 'subscription','provider_policy':'openai_subscription_strict','release':release,'generation':8,'process_id':os.getpid(),'process_started_utc':started,'core_sha256':hashlib.sha256(open(os.path.join(os.path.dirname(__file__),'Ainur.Core.dll'),'rb').read()).hexdigest().upper()}
+  elif self.path=='/api/v1/health':
+   payload={'ready': mode!='smoke-health-reject','schema':6,'Generation':8,'draining':False}
+  elif self.path=='/':
+   path=os.path.join(os.path.dirname(__file__),'wwwroot','index.html')
+   if mode=='smoke-index-reject':
+    data=b'<html>failure</html>'
+   else:
+    data=open(path,'rb').read()
+   self.send_response(200);self.send_header('Content-Type','text/html');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
+  elif self.path in ('/assets/index-valid.js','/assets/index-valid.css'):
+   path=os.path.join(os.path.dirname(__file__),'wwwroot',self.path.lstrip('/'))
+   data=(b'bad-asset' if mode=='smoke-asset-reject' and self.path.endswith('.js') else open(path,'rb').read())
+   self.send_response(200);self.send_header('Content-Type','text/javascript' if self.path.endswith('.js') else 'text/css');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data);return
   else:
    self.send_error(403); return
   data=json.dumps(payload).encode()
@@ -72,6 +91,9 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
 [IO.File]::WriteAllText((Join-Path $fixture 'release.json'),'{'+'"id":"rdummy1"'+'}',[Text.UTF8Encoding]::new($false))
 $cases = @(
  @{ name='positive-receipt'; mode='valid'; expected='finished'; valid=$true },
+ @{ name='smoke-index-reject'; mode='smoke-index-reject'; expected='SMOKE_INDEX_INVALID'; valid=$true },
+ @{ name='smoke-asset-reject'; mode='smoke-asset-reject'; expected='SMOKE_ASSET_HASH_MISMATCH'; valid=$true },
+ @{ name='smoke-health-reject'; mode='smoke-health-reject'; expected='SMOKE_HEALTH_INVALID'; valid=$true },
  @{ name='offset-five-valid'; mode='offset-five'; expected='finished'; valid=$true },
  @{ name='offset-five-tampered'; mode='offset-tamper'; expected='RECEIPT_START_MISMATCH'; valid=$true },
  @{ name='offset-missing'; mode='no-offset'; expected='RECEIPT_START_INVALID'; valid=$true },
@@ -113,9 +135,9 @@ foreach($case in $cases) {
  if(!$case.valid -and $record.child_disposition -ne 'NOT_STARTED'){throw "PRELAUNCH_STARTED_CHILD $($case.name)"}
  if($case.valid -and (!$record.stopped -or !$record.process_id -or !$record.process_started_utc)){throw "CHILD_UNIDENTIFIED_OR_LIVE $($case.name)"}
  if(!$case.valid -and $record.process_id){throw 'BAD_CORE_DISPATCHED'}
- if($case.name -in @('positive-receipt','offset-five-valid') -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden' -or $record.start_delta_seconds -gt 2)){throw 'POSITIVE_RECEIPT_MISSING'}
+ if($case.name -in @('positive-receipt','offset-five-valid') -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden' -or $record.start_delta_seconds -gt 2 -or $record.ui_index -cne 'ok' -or $record.ui_assets -cne 'js-css-sha256-ok' -or $record.api_health -cne 'ready-schema6-generation-match')){throw 'POSITIVE_RECEIPT_OR_SMOKE_MISSING'}
  if($case.name -eq 'offset-five-tampered' -and ($record.start_delta_seconds -lt 17998 -or $record.start_delta_seconds -gt 18002 -or $record.PSObject.Properties.Name -contains 'route_class')){throw 'TAMPERED_OFFSET_NOT_REJECTED'}
  if($case.name -eq 'offset-missing' -and $record.PSObject.Properties.Name -contains 'route_class'){throw 'MISSING_OFFSET_NOT_REJECTED'}
  "PASS $($case.name) $($record.stage) $($record.error_code) seconds=$([Math]::Round($timer.Elapsed.TotalSeconds,2))"
 }
-'PASSED=18'
+'PASSED=21'

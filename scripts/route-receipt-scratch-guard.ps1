@@ -79,11 +79,31 @@ public sealed class AinurRestrictedStartupCapture {
 }
 '@ -ErrorAction Stop
 $capture = [AinurRestrictedStartupCapture]::new()
-$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; startup_exception_kind = 'UNCLASSIFIED'; startup_component = 'UNKNOWN'; startup_site = 'UNKNOWN'; start_delta_seconds = $null; scratch_root = $null; error_code = $null }
+$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; startup_exception_kind = 'UNCLASSIFIED'; startup_component = 'UNKNOWN'; startup_site = 'UNKNOWN'; start_delta_seconds = $null; scratch_root = $null; error_code = $null; smoke_step = $null; smoke_failure_kind = $null; smoke_inner_kind = $null; smoke_safe_code = $null; smoke_guard_line = $null; ui_index = $null; ui_assets = $null; api_health = $null }
 function Remaining-ReceiptTime([Diagnostics.Stopwatch]$Clock) {
  $remainingMs = 12000 - [int]$Clock.ElapsedMilliseconds
  if($remainingMs -le 0) { throw 'RECEIPT_TIMEOUT' }
  return [TimeSpan]::FromMilliseconds($remainingMs)
+}
+function Get-BoundedSmoke([Net.Http.HttpClient]$Client,[string]$Uri,[Diagnostics.Stopwatch]$Deadline,[int]$MaxBytes,[string]$ExpectedType,[string]$FailureCode) {
+	$request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$Uri)
+	try {
+		$response = $Client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).WaitAsync((Remaining-ReceiptTime $Deadline)).GetAwaiter().GetResult()
+		try {
+			if([int]$response.StatusCode -ne 200 -or $response.Content.Headers.ContentType.MediaType -notlike "*$ExpectedType*" -or
+				$response.Content.Headers.ContentLength -gt $MaxBytes -or $response.Content.Headers.ContentEncoding.Count -ne 0) { throw $FailureCode }
+			$stream = $response.Content.ReadAsStreamAsync().WaitAsync((Remaining-ReceiptTime $Deadline)).GetAwaiter().GetResult()
+			$memory = [IO.MemoryStream]::new()
+			try {
+				$buffer = [byte[]]::new(8192)
+				while(($n = $stream.ReadAsync($buffer,0,[Math]::Min($buffer.Length,$MaxBytes + 1 - [int]$memory.Length)).WaitAsync((Remaining-ReceiptTime $Deadline)).GetAwaiter().GetResult()) -gt 0) {
+					$memory.Write($buffer,0,$n)
+					if($memory.Length -gt $MaxBytes) { throw $FailureCode }
+				}
+				return [Text.Encoding]::UTF8.GetString($memory.ToArray())
+			} finally { $stream.Dispose();$memory.Dispose() }
+		} finally { $response.Dispose() }
+	} finally { $request.Dispose() }
 }
 function Stop-ExactChild([Diagnostics.Process]$Child) {
  try {
@@ -306,10 +326,45 @@ try {
 			$record.schema = 6
 			$record.auth_negative = 'absent-invalid-query-forbidden'
 			$record.generation = [int]$receipt.generation
+			# Extra checks remain under the SAME receipt deadline, same loopback client,
+			# and run only after the authenticated strict receipt has been pinned.
+			if([IO.Directory]::Exists((Join-Path $release 'wwwroot'))) {
+				if(![IO.File]::Exists((Join-Path $release 'wwwroot/index.html'))) { throw 'SMOKE_INDEX_MISSING' }
+				$webRoot = "http://127.0.0.1:$Port"
+				$record.smoke_step = 'index'
+				$index = Get-BoundedSmoke $client "$webRoot/" $receiptDeadline 4096 'text/html' 'SMOKE_INDEX'
+				if($index -cnotmatch '<title>Ainur</title>' -or $index -cnotmatch '<div id="root"></div>') { throw 'SMOKE_INDEX_INVALID' }
+				$assets = @([regex]::Matches($index,'(?:src|href)="(/assets/[A-Za-z0-9_-]+\.(?:js|css))"') | ForEach-Object { $_.Groups[1].Value })
+				if($assets.Count -ne 2 -or @($assets | Where-Object { $_ -cnotmatch '^/assets/[A-Za-z0-9_-]+\.(?:js|css)$' }).Count -ne 0 -or
+					@($assets | Where-Object { $_.EndsWith('.js') }).Count -ne 1 -or @($assets | Where-Object { $_.EndsWith('.css') }).Count -ne 1) { throw 'SMOKE_ASSETS_INVALID' }
+				$record.ui_index = 'ok'
+				foreach($asset in $assets) {
+					$assetPath = Join-Path (Join-Path $release 'wwwroot') $asset.TrimStart('/')
+					if(![IO.File]::Exists($assetPath) -or [IO.Path]::GetFullPath($assetPath).StartsWith((Join-Path $release 'wwwroot') + '/', [StringComparison]::Ordinal) -ne $true) { throw 'SMOKE_ASSET_PIN_MISSING' }
+					$type = if($asset.EndsWith('.js')) { 'javascript' } else { 'text/css' }
+					$maxBytes = if($asset.EndsWith('.js')) { 524288 } else { 32768 }
+					$record.smoke_step = if($asset.EndsWith('.js')) { 'js' } else { 'css' }
+					$actual = Get-BoundedSmoke $client "$webRoot$asset" $receiptDeadline $maxBytes $type 'SMOKE_ASSET'
+					if([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($actual))) -cne (Get-FileHash -LiteralPath $assetPath -Algorithm SHA256).Hash) { throw 'SMOKE_ASSET_HASH_MISMATCH' }
+				}
+				$record.ui_assets = 'js-css-sha256-ok'
+				$record.smoke_step = 'health'
+				$health = Get-BoundedSmoke $client "$base/health" $receiptDeadline 4096 'application/json' 'SMOKE_HEALTH' | ConvertFrom-Json -DateKind String
+				if($health.ready -cne $true -or [int]$health.schema -ne 6 -or [int]$health.Generation -ne [int]$receipt.generation -or $health.draining -cne $false) { throw 'SMOKE_HEALTH_INVALID' }
+				$record.api_health = 'ready-schema6-generation-match'
+			}
 		} finally { $client.Dispose() }
 	}
 	$record.stage = 'finished'
 } catch {
+	if($record.smoke_step) {
+		$kind = $_.Exception.GetType().Name
+		$record.smoke_failure_kind = if($kind -in @('MethodException','MethodInvocationException','RuntimeException','HttpRequestException','NullReferenceException','InvalidOperationException','ParameterBindingException')) { $kind } else { 'UNCLASSIFIED' }
+		$innerType = if($_.Exception.InnerException) { $_.Exception.InnerException.GetType().Name } else { 'NONE' }
+		$record.smoke_inner_kind = if($innerType -in @('HttpRequestException','SocketException','TimeoutException','TaskCanceledException','InvalidOperationException')) { $innerType } else { 'NONE' }
+		$record.smoke_safe_code = if($_.Exception.Message -cmatch '^SMOKE_[A-Z_]+$') { $_.Exception.Message } else { 'NONE' }
+		$record.smoke_guard_line = if($_.InvocationInfo.ScriptLineNumber -ge 1 -and $_.InvocationInfo.ScriptLineNumber -le 600) { [int]$_.InvocationInfo.ScriptLineNumber } else { 0 }
+	}
 	$record.error_code = if($receiptDeadline -and $receiptDeadline.ElapsedMilliseconds -ge 12000) { 'RECEIPT_TIMEOUT' }
 		elseif($_.Exception.Message -match '^[A-Z_]+$') { $_.Exception.Message } else { 'SETUP_FAILED' }
 	$record.stage = 'failed'
