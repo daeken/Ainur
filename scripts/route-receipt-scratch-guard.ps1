@@ -9,7 +9,10 @@ param(
 	[Parameter(Mandatory)] [string]$ExpectedReleaseId,
 	[Parameter(Mandatory)] [int]$Port,
 	[Parameter(Mandatory)] [string]$EvidencePath,
-	[Parameter()] [string[]]$ChildArguments = @()
+	[Parameter()] [string[]]$ChildArguments = @(),
+	# Fixed-purpose receipt probe; never accepts executable callbacks or supplied keys.
+	[Parameter()] [string]$ExpectedCoreSha256,
+	[Parameter()] [string]$ExpectedServerSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -59,7 +62,9 @@ try {
 		[IO.Path]::GetDirectoryName($root) -cne '/tmp' -or
 		$root -in @('/tmp','/Users/daeken','/Users/daeken/projects/Ainur/src/Ainur.Server/.ainur/dev')) { throw 'UNSAFE_ROOT' }
 	if($Port -lt 1 -or $Port -gt 65535) { throw 'INVALID_PORT' }
-	if($ExpectedExecutableSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedReleaseId -notmatch '^r[A-Za-z0-9-]+$') { throw 'INVALID_PIN' }
+	if($ExpectedExecutableSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedReleaseId -notmatch '^r[A-Za-z0-9-]+$' -or
+		($PSBoundParameters.ContainsKey('ExpectedCoreSha256') -and ($ExpectedCoreSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedServerSha256 -notmatch '^[A-Fa-f0-9]{64}$')) -or
+		(!$PSBoundParameters.ContainsKey('ExpectedCoreSha256') -and $PSBoundParameters.ContainsKey('ExpectedServerSha256'))) { throw 'INVALID_PIN' }
 	if($evidence.StartsWith($root + '/', [StringComparison]::Ordinal) -or ![IO.Directory]::Exists([IO.Path]::GetDirectoryName($evidence))) { throw 'UNSAFE_EVIDENCE' }
 	if(![IO.File]::Exists($evidence) -or [IO.Path]::GetDirectoryName($evidence) -cne '/tmp') { throw 'MISSING_EVIDENCE' }
 	# macOS /tmp is the well-known system symlink to /private/tmp; pin it exactly.
@@ -103,8 +108,38 @@ try {
 		@($ChildArguments | Where-Object { $_ -match '^--(home|port|release)(=|$)' }).Count -ne 0) { throw 'ARGV_MISMATCH' }
 	Assert-ScratchHome $psi.ArgumentList[1] $root
 	if((Get-Item -LiteralPath $root -Force).LinkTarget -or (Get-Item -LiteralPath $scratchHome -Force).LinkTarget) { throw 'SYMLINK_COMPONENT' }
+	if($PSBoundParameters.ContainsKey('ExpectedCoreSha256')) {
+		if($ChildArguments.Count -ne 0) { throw 'RECEIPT_EXTRA_ARGS' }
+		$coreAssembly = Join-Path $release 'Ainur.Core.dll'
+		$serverAssembly = Join-Path $release 'Ainur.Server.dll'
+		Assert-NoSymbolicComponents $coreAssembly
+		Assert-NoSymbolicComponents $serverAssembly
+		if(![IO.File]::Exists($coreAssembly) -or (Get-FileHash -LiteralPath $coreAssembly -Algorithm SHA256).Hash -cne $ExpectedCoreSha256.ToUpperInvariant()) { throw 'CORE_MISMATCH' }
+		if(![IO.File]::Exists($serverAssembly) -or (Get-FileHash -LiteralPath $serverAssembly -Algorithm SHA256).Hash -cne $ExpectedServerSha256.ToUpperInvariant()) { throw 'SERVER_MISMATCH' }
+		# Provision only this new 0700 home. Key is never in argv, env, output or evidence.
+		$supervisor = Join-Path $scratchHome 'supervisor'
+		$secrets = Join-Path $supervisor 'receipt-secrets'
+		foreach($directory in @($supervisor,$secrets)) {
+			[IO.Directory]::CreateDirectory($directory) | Out-Null
+			[IO.File]::SetUnixFileMode($directory,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+		}
+		$keyPath = Join-Path $secrets 'route-receipt.key'
+		if([IO.File]::Exists($keyPath) -or [IO.Directory]::Exists($keyPath)) { throw 'KEY_ALREADY_EXISTS' }
+		$key = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+		$stream = [IO.FileStream]::new($keyPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+		try {
+			[IO.File]::SetUnixFileMode($keyPath,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
+			$bytes = [Text.Encoding]::ASCII.GetBytes($key + "`n")
+			$stream.Write($bytes)
+			$stream.Flush($true)
+		} finally { $stream.Dispose() }
+		Assert-ScratchHome $scratchHome $root
+		Assert-NoSymbolicComponents $keyPath
+	}
 	# Recheck the release and marker immediately before child creation. Only this line may launch.
 	if((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $ExpectedExecutableSha256.ToUpperInvariant() -or
+		($PSBoundParameters.ContainsKey('ExpectedCoreSha256') -and ((Get-FileHash -LiteralPath $coreAssembly -Algorithm SHA256).Hash -cne $ExpectedCoreSha256.ToUpperInvariant() -or
+		(Get-FileHash -LiteralPath $serverAssembly -Algorithm SHA256).Hash -cne $ExpectedServerSha256.ToUpperInvariant())) -or
 		(Get-Content -LiteralPath $marker -Raw) -cne $nonce) { throw 'PIN_CHANGED' }
 	$process = [Diagnostics.Process]::Start($psi)
 	$record.stage = 'launched'
@@ -115,6 +150,68 @@ try {
 	try { $started = $process.StartTime } catch { $started = $null }
 	if($null -eq $started) { throw 'START_IDENTITY_UNAVAILABLE' }
 	$record.process_started_utc = $started.ToUniversalTime().ToString('O')
+	if($PSBoundParameters.ContainsKey('ExpectedCoreSha256')) {
+		# Every HTTP operation has a fixed deadline; finally retains ownership of the child.
+		$handler = [Net.Http.HttpClientHandler]::new()
+		$handler.UseProxy = $false
+		$handler.AllowAutoRedirect = $false
+		$client = [Net.Http.HttpClient]::new($handler)
+		$client.Timeout = [TimeSpan]::FromSeconds(2)
+		$probeDeadline = [Diagnostics.Stopwatch]::StartNew()
+		try {
+			$base = "http://127.0.0.1:$Port/api/v1"
+			$version = $null
+			while(!$version -and $probeDeadline.ElapsedMilliseconds -lt 3500) {
+				if($process.HasExited) { throw 'CHILD_EXITED_BEFORE_RECEIPT' }
+				try {
+					$versionResponse = $client.GetAsync("$base/version").WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult()
+					try {
+						if(!$versionResponse.IsSuccessStatusCode) { throw 'VERSION_HTTP_FAILED' }
+						$version = $versionResponse.Content.ReadAsStringAsync().WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult() | ConvertFrom-Json
+					} finally { $versionResponse.Dispose() }
+				} catch {
+					if($probeDeadline.ElapsedMilliseconds -ge 3500) { throw 'RECEIPT_TIMEOUT' }
+					[Threading.Thread]::Sleep(75)
+				}
+			}
+			if(!$version -or $version.release -cne $ExpectedReleaseId -or [int]$version.schema -ne 6) { throw 'VERSION_MISMATCH' }
+			# Every negative must fail before accepting the positive authenticated receipt.
+			foreach($negative in @('absent','invalid','query')) {
+				$uri = if($negative -eq 'query') { "$base/control/route-receipt?key=not-a-token" } else { "$base/control/route-receipt" }
+				$deniedRequest = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$uri)
+				try {
+					if($negative -eq 'invalid') { $deniedRequest.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',('0' * 64)) }
+					if($negative -eq 'query') { $deniedRequest.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$key) }
+					$denied = $client.SendAsync($deniedRequest).WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult()
+					try { if([int]$denied.StatusCode -ne 403) { throw 'AUTH_NEGATIVE_FAILED' } }
+					finally { $denied.Dispose() }
+				} finally { $deniedRequest.Dispose() }
+			}
+			$request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,"$base/control/route-receipt")
+			try {
+				$request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$key)
+				$response = $client.SendAsync($request).WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult()
+				try {
+					if(!$response.IsSuccessStatusCode) { throw 'RECEIPT_HTTP_FAILED' }
+					$receipt = $response.Content.ReadAsStringAsync().WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult() | ConvertFrom-Json
+				} finally { $response.Dispose() }
+			} finally { $request.Dispose() }
+			if($process.HasExited) { throw 'RECEIPT_CHILD_EXITED' }
+			if($receipt.route_class -cne 'subscription' -or $receipt.provider_policy -cne 'openai_subscription_strict') { throw 'RECEIPT_ROUTE_MISMATCH' }
+			if($receipt.release -cne $ExpectedReleaseId -or $receipt.core_sha256 -cne $ExpectedCoreSha256.ToUpperInvariant()) { throw 'RECEIPT_PIN_MISMATCH' }
+			if([int]$receipt.process_id -ne $process.Id -or [int]$receipt.generation -ne [int]$version.generation) { throw 'RECEIPT_IDENTITY_MISMATCH' }
+			$reportedStart = [DateTimeOffset]::Parse([string]$receipt.process_started_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal)
+			$startDelta = [Math]::Abs(($reportedStart.ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds)
+			if($startDelta -gt 2) { throw 'RECEIPT_START_MISMATCH' }
+			$record.route_class = 'subscription'
+			$record.provider_policy = 'openai_subscription_strict'
+			$record.core_sha256 = $ExpectedCoreSha256.ToUpperInvariant()
+			$record.server_sha256 = $ExpectedServerSha256.ToUpperInvariant()
+			$record.schema = 6
+			$record.auth_negative = 'absent-invalid-query-forbidden'
+			$record.generation = [int]$receipt.generation
+		} finally { $client.Dispose() }
+	}
 	$process.WaitForExit(5000) | Out-Null
 	if(!$process.HasExited) { $process.Kill(); $process.WaitForExit() }
 	$record.exit_code = $process.ExitCode
