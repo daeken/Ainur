@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
-    <ProjectReference Include="..\Ainur.Core\Ainur.Core.csproj" />
+    <ProjectReference Include="../Ainur.Core/Ainur.Core.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
