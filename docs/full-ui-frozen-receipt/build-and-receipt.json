@@ -1,0 +1,88 @@
+{
+  "manifest_version": 1,
+  "source_commit": "18005e8c61f61c11c4c931d3d5cd87438c231a24",
+  "source_tree": "e6fd3e2755411282974db3103dcf0564574a594b",
+  "source_ref": "refs/heads/ainur/ulmo/full-ui-unix-package",
+  "source_ref_remote_readback": "18005e8c61f61c11c4c931d3d5cd87438c231a24\trefs/heads/ainur/ulmo/full-ui-unix-package",
+  "source_clean": true,
+  "source_files": [
+    {
+      "relative_path": "web/package.json",
+      "sha256": "B139B3E451864DBD9415FD172D5C485DB218A66BDC3D5FA71B3DDCA105A9B18A"
+    },
+    {
+      "relative_path": "web/package-lock.json",
+      "sha256": "A057D46E4D3793A3FDACD03DECACA991D386D23B34B2D94F004C121B0FEB8122"
+    },
+    {
+      "relative_path": "web/vite.config.ts",
+      "sha256": "82E3DA5A525188F9A008D65CF02A64744EDDC2C80EED92BFCF6A4A528A22DD80"
+    },
+    {
+      "relative_path": "src/Ainur.Server/Ainur.Server.csproj",
+      "sha256": "CA34E1ACBFABE6EAC20F71F165B541C9A95AC6B1DBF8C753A54EAE512514A08B"
+    },
+    {
+      "relative_path": "src/Ainur.Core/Ainur.Core.csproj",
+      "sha256": "AA2246C0A365983C8842E68E47ACAF46AEB82B9DE1C226CBD8631B9DB29F366B"
+    },
+    {
+      "relative_path": "src/Ainur.Server/RouteReceipt.cs",
+      "sha256": "D35527175E609A77E07707E079095747748AB94619C2A399843E9C16CACD1860"
+    },
+    {
+      "relative_path": "src/Ainur.Server/Api.cs",
+      "sha256": "A44F06FE6D05027F40E4D8DD262D1F14D387A3A58F79FDBEF5B2894681D63461"
+    },
+    {
+      "relative_path": "src/Ainur.Server/Program.cs",
+      "sha256": "05BAF69892F1CA2D1C9B8D846649B564A3C8525C74D58B8D344BB83E7D777AE7"
+    }
+  ],
+  "ui_build_command": "npm --prefix web run build",
+  "ui_build_exit": 0,
+  "restore_command": "dotnet restore src/Ainur.Server/Ainur.Server.csproj --source /Users/daeken/.nuget/packages --ignore-failed-sources --nologo -v:q",
+  "restore_exit": 0,
+  "publish_command": "dotnet publish src/Ainur.Server/Ainur.Server.csproj -c Release -o <fresh physical directory> --no-restore --nologo -v:q",
+  "publish_exit": 0,
+  "payload_directory": "/tmp/ainur-ulmo-full-ui-release-18005e8-verified",
+  "release_json": {
+    "id": "r20261003-ulmo-fullui-18005e8-4d6baf032671",
+    "source": "/private/tmp/ainur-ulmo-strict-fullrelease",
+    "revision": "18005e8c61f61c11c4c931d3d5cd87438c231a24",
+    "built_at": "2026-10-03T18:53:24.565938Z",
+    "dirty": false
+  },
+  "payload_files_sha256": "482AC381952C9897CC4B6C1DE30863C323D28DD25C1E3C28A49C4249577AE189",
+  "payload_file_count": 471,
+  "payload_total_bytes": 113880729,
+  "payload_all_regular_files": true,
+  "payload_symlink_count": 0,
+  "ui_file_count": 9,
+  "dependencies_json_sha256": "39F92678EA4F61B54CC19802C8832DC2858D36D9A90AC8940974EFC935E2AD8D",
+  "runtimeconfig_sha256": "F71B4C67B5233A19BE9131B5FE4B45FE7829997CF2B42E762D6BAA037DA93863",
+  "guard_ref": "refs/heads/ainur/ulmo/receipt-offset-safety",
+  "guard_commit": "f4d35511979b48dc80a61e6ceb722fdaa06f1566",
+  "guard_sha256": "3AB0B379C4802D8E1433C1478BDB64234050E807BE21B2FE64B683F63B4AB40C",
+  "guard_fixture_sha256": "C61E902D610DCC3E75E1FBE2DC7136B38728AD061FD63AF286BA36A8CDD93835",
+  "receipt_path": "/tmp/ainur-rr-fixed-evidence-e3ef60f6457c44bf88960ecc77e53e82.json",
+  "receipt_sha256": "31FD9C19E35436C6C03920CE80BFA0A0C5C31C0D4EDC8B0D0F8FC3606204F081",
+  "receipt_pid": 91579,
+  "receipt_stage": "finished",
+  "receipt_child_disposition": "EXIT_VERIFIED",
+  "receipt_start_delta_seconds": 0,
+  "receipt_route_class": "subscription",
+  "receipt_provider_policy": "openai_subscription_strict",
+  "offline_suite": "dotnet test tests/Ainur.Tests/Ainur.Tests.csproj --filter \"Category!=Live\" --no-restore --nologo -v:normal",
+  "offline_suite_result": "PASSED: 158/158; exit 0",
+  "url_http_ui_api_smoke": "NOT_VERIFIED; pinned guard terminated child after verified receipt; no new child authorized for URL smoke",
+  "ui_source_plain_files": 3,
+  "ui_published_precompressed_files": 6,
+  "ui_plain_sources_match_sha256": true,
+  "ui_precompressed_decompression_matches_sha256": true,
+  "source_static_api_route_checks": "all 9 checks passed: api version, api health, api control/route-receipt, route bearer, provider strict, UseDefaultFiles, UseStaticFiles, MapFallbackToFile(index.html), physical index",
+  "payload_regular_directory_count": 113,
+  "final_receipt_child_pid_absent": true,
+  "final_receipt_port_absent": true,
+  "exit_code_137_meaning": "guard Stop-ExactChild killed pinned child after route receipt, not startup failure; EXIT_VERIFIED with no PID or port after"
+}
