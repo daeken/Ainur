@@ -25,13 +25,20 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 	readonly Func<string?> apiKey;
 	readonly Func<string?> codexAuthPath;
 	readonly Func<string> routeSetting;
+	internal static OpenAiRoutePolicy ParseRoute(string? route) => route?.Trim().ToLowerInvariant() switch {
+		"auto" => OpenAiRoutePolicy.Auto,
+		"subscription" => OpenAiRoutePolicy.Subscription,
+		"api" => OpenAiRoutePolicy.Api,
+		_ => OpenAiRoutePolicy.Unknown,
+	};
+	public OpenAiRoutePolicy SnapshotRoutePolicy() => ParseRoute(routeSetting());
 	readonly Func<long> nowMs;
 
-	public OpenAiResponsesProvider(HttpClient http, Func<string?>? apiKey = null, Func<string?>? codexAuthPath = null, string? routeOverride = null, Func<long>? nowMs = null) {
+	public OpenAiResponsesProvider(HttpClient http, Func<string?>? apiKey = null, Func<string?>? codexAuthPath = null, string? routeOverride = null, Func<long>? nowMs = null, Func<string>? routeProvider = null) {
 		this.http = http;
 		this.apiKey = apiKey ?? (() => Credentials.Resolve("openai"));
 		this.codexAuthPath = codexAuthPath ?? DefaultCodexAuthPath;
-		this.routeSetting = () => routeOverride ?? Environment.GetEnvironmentVariable("AINUR_OPENAI_ROUTE") ?? "auto";
+		this.routeSetting = routeProvider ?? (() => routeOverride ?? Environment.GetEnvironmentVariable("AINUR_OPENAI_ROUTE") ?? "auto");
 		this.nowMs = nowMs ?? (() => Clock.Now);
 	}
 
@@ -41,24 +48,31 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 			: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "auth.json");
 
 	public async Task<ProviderResponse> CompleteAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
-		// Billing fixes the transport for the entire attempt. Only ModelGateway may select and
-		// independently quote/admit a different billing route; credentials never select a paid route.
-		// API-billed rows stay API even under a subscription preference (never reverse-fallback).
+		// A gateway call pins one route for selection/quote/dispatch. A changed process route
+		// cannot expand that policy between admission and network dispatch.
+		var route = CheckRoute(request);
 		if(string.Equals(request.Model.Billing, "api", StringComparison.OrdinalIgnoreCase))
 			return await CompleteApiAsync(request, onDelta, ct);
 		if(!string.Equals(request.Model.Billing, "subscription", StringComparison.OrdinalIgnoreCase))
 			throw new ProviderException("OpenAI model billing must be subscription or api.");
-		var route = routeSetting().Trim().ToLowerInvariant();
-		if(route == "api")
+		if(route == OpenAiRoutePolicy.Api)
 			throw new ProviderException("OpenAI route 'api' conflicts with subscription model billing. Select an API-billed model so the gateway can quote and admit its cash cost.");
-		if(route is not ("auto" or "subscription"))
-			throw new ProviderException("OpenAI route must be auto, subscription, or api.");
 		return await CompleteSubscriptionAsync(request, onDelta, ct);
+	}
+	OpenAiRoutePolicy CheckRoute(ProviderRequest request) {
+		var configured = ParseRoute(routeSetting());
+		var route = request.OpenAiRoutePolicy ?? configured;
+		if(configured == OpenAiRoutePolicy.Unknown || route == OpenAiRoutePolicy.Unknown || configured != route)
+			throw new ProviderException("OpenAI route changed or is unknown; no transport dispatched.");
+		if(route == OpenAiRoutePolicy.Subscription && string.Equals(request.Model.Billing, "api", StringComparison.OrdinalIgnoreCase))
+			throw new ProviderException("OpenAI subscription-only route excludes API-billed models.");
+		return route;
 	}
 	async Task<ProviderResponse> CompleteApiAsync(ProviderRequest request, Action<StreamDelta>? onDelta, CancellationToken ct) {
 		var key = apiKey();
 		if(string.IsNullOrEmpty(key))
 			throw new ProviderException("OpenAI api route selected but no OPENAI_API_KEY found. Set the OPENAI_API_KEY environment variable or store it in the macOS keychain under service 'ai.openai.api'.");
+		CheckRoute(request);
 		return await SendAsync(ApiEndpoint, request, onDelta, ct, m => {
 			m.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
 			m.Headers.TryAddWithoutValidation("OpenAI-Beta", "responses=experimental");
@@ -69,7 +83,9 @@ public sealed class OpenAiResponsesProvider : IModelProvider {
 		var credential = await ResolveSubscriptionCredentialAsync(ct);
 		if(credential is null)
 			throw new ProviderException("OpenAI subscription route selected but no usable ChatGPT subscription credential (access token + account id) was found in the Codex auth file.");
-		// Preserve the original error, status and billing uncertainty for gateway fallback policy.
+		// Recheck after potentially slow credential resolution; route drift must not
+		// turn a quote under one policy into transport under another.
+		CheckRoute(request);
 		return await SendAsync(SubscriptionEndpoint, request, onDelta, ct, m => BuildSubscriptionHeaders(m, credential));
 	}
 	static void BuildSubscriptionHeaders(HttpRequestMessage m, SubscriptionCredential cred) {

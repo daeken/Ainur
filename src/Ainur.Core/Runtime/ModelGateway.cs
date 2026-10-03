@@ -43,16 +43,33 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		var estimate = call.EstimatedInputTokens
 			?? call.Messages.Sum(Context.ContextBuilder.MessageTokens)
 			+ call.Tools.Sum(t => Tokens.Estimate(t.InputSchema.ToJsonString()) + Tokens.Estimate(t.Description));
-		var chain = BuildChain(store.GetModel(call.Model.Id) ?? call.Model);
+		// Pin policy before selecting/quoting a fallback; provider checks for drift before transport.
+		var primary = store.GetModel(call.Model.Id) ?? call.Model;
+		var linked = string.IsNullOrEmpty(primary.FallbackModelId) ? null : store.GetModel(primary.FallbackModelId!);
+		var usesOpenAi = string.Equals(primary.Provider, "openai", StringComparison.OrdinalIgnoreCase) ||
+			string.Equals(linked?.Provider, "openai", StringComparison.OrdinalIgnoreCase);
+		var route = usesOpenAi && providers.Get("openai") is OpenAiResponsesProvider openai
+			? openai.SnapshotRoutePolicy() : (OpenAiRoutePolicy?) null;
+		if(route == OpenAiRoutePolicy.Unknown)
+			throw new ProviderException("OpenAI route is unknown; no model request dispatched.");
+		if(route == OpenAiRoutePolicy.Subscription && string.Equals(primary.Provider, "openai", StringComparison.OrdinalIgnoreCase) &&
+			string.Equals(primary.Billing, "api", StringComparison.OrdinalIgnoreCase))
+			throw new ProviderException("OpenAI subscription-only route excludes API-billed models before quote.");
+		var chain = BuildChain(primary, route);
 		for(var i = 0; i < chain.Count; i++) {
+			if(route is not null && providers.Get("openai") is OpenAiResponsesProvider current && current.SnapshotRoutePolicy() != route)
+				throw new ProviderException("OpenAI route changed before model quote; no fallback dispatched.");
 			var model = store.GetModel(chain[i].Id) ?? chain[i];
+			if(route == OpenAiRoutePolicy.Subscription && string.Equals(model.Provider, "openai", StringComparison.OrdinalIgnoreCase) &&
+				string.Equals(model.Billing, "api", StringComparison.OrdinalIgnoreCase))
+				throw new ProviderException("OpenAI subscription-only route excludes API-billed models before quote.");
 			if(!model.Enabled)
 				throw new DomainException($"Model '{model.Id}' is disabled and cannot be called.");
 			var emitted = false;
 			Action<StreamDelta> onDelta = d => { emitted = true; call.OnDelta?.Invoke(d); };
 			var requestId = Ids.New("req");
 			try {
-				return await AttemptAsync(call, model, requestId, estimate, effort, onDelta, () => emitted, ct);
+				return await AttemptAsync(call, model, requestId, estimate, effort, onDelta, () => emitted, ct, route);
 			} catch(Exception e) {
 				var cause = FailoverClass(e);
 				if(i + 1 < chain.Count && !emitted && cause is not null) {
@@ -69,11 +86,14 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 	}
 
 	/// <summary>Resolves the primary model plus its enabled fallback (if any and different).</summary>
-	List<ModelInfo> BuildChain(ModelInfo primary) {
+	List<ModelInfo> BuildChain(ModelInfo primary, OpenAiRoutePolicy? route) {
 		var chain = new List<ModelInfo> { primary };
 		if(!string.IsNullOrEmpty(primary.FallbackModelId)) {
 			var fallback = store.GetModel(primary.FallbackModelId!);
-			if(fallback is { Enabled: true } && fallback.Id != primary.Id && providers.Has(fallback.Provider))
+			if(fallback is { Enabled: true } && fallback.Id != primary.Id && providers.Has(fallback.Provider) &&
+				!(string.Equals(fallback.Provider, "openai", StringComparison.OrdinalIgnoreCase) &&
+					(route == OpenAiRoutePolicy.Subscription || route == OpenAiRoutePolicy.Unknown) &&
+					string.Equals(fallback.Billing, "api", StringComparison.OrdinalIgnoreCase)))
 				chain.Add(fallback);
 		}
 		return chain;
@@ -97,7 +117,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		return pe.Retryable ? "unavailable" : null;
 	}
 
-	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, string effort, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct) {
+	async Task<ModelCallResult> AttemptAsync(ModelCall call, ModelInfo model, string requestId, long estimate, string effort, Action<StreamDelta> onDelta, Func<bool> emitted, CancellationToken ct, OpenAiRoutePolicy? route) {
 		var provider = providers.Get(model.Provider);
 		var quote = Pricing.Quote(model, estimate, call.MaxOutputTokens);
 		var record = new ModelRequestRecord {
@@ -107,6 +127,7 @@ public sealed class ModelGateway(Store store, Ledger ledger, ArtifactStore artif
 		};
 		var request = new ProviderRequest {
 			Model = model, Messages = call.Messages, Tools = call.Tools, MaxOutputTokens = call.MaxOutputTokens, ReasoningEffort = effort, EnableWebSearch = call.EnableWebSearch,
+			OpenAiRoutePolicy = route,
 		};
 		// Intent and reservation commit before dispatch so a crash leaves evidence of a possibly-billed request.
 		store.Db.Write(u => {

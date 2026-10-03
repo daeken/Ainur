@@ -24,6 +24,9 @@ public sealed class ChatMessage {
 	public static ChatMessage Tool(string callId, string text) => new() { Role = "tool", ToolCallId = callId, Content = text };
 }
 
+/// <summary>A single dispatch's OpenAI route policy; Unknown must never admit a transport.</summary>
+public enum OpenAiRoutePolicy { Unknown, Auto, Subscription, Api }
+
 public sealed class ProviderRequest {
 	public required ModelInfo Model { get; init; }
 	public required List<ChatMessage> Messages { get; init; }
@@ -33,6 +36,8 @@ public sealed class ProviderRequest {
 	public string? ToolChoice { get; init; }
 	/// <summary>Opt in to native OpenAI web search; retrieved pages count toward reported input usage.</summary>
 	public bool EnableWebSearch { get; init; }
+	/// <summary>Gateway-captured route, checked again against provider configuration before transport.</summary>
+	public OpenAiRoutePolicy? OpenAiRoutePolicy { get; init; }
 }
 
 public sealed class Usage {
