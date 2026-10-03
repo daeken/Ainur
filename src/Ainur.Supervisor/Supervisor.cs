@@ -196,8 +196,8 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			throw new InvalidOperationException("Cannot start another runtime while a child is alive or intervention is required");
 		var dir = releases.PathFor(releaseId);
 		if(!StrictReleaseGate.Verify(releaseId, dir, out var reason) ||
-			!StrictReleaseGate.VerifyProtectedInstall(releaseId, dir, StrictReleaseGate.CurrentUid(), out reason)) {
-			RequireIntervention($"HOLD_NO_SPAWN: {reason}; strict full-payload/protected-install gate failed for {releaseId}");
+			!StrictReleaseGate.VerifyControlledInstall(releaseId, dir, StrictReleaseGate.CurrentUid(), out reason)) {
+			RequireIntervention($"HOLD_NO_SPAWN: {reason}; strict full-payload/controlled-install gate failed for {releaseId}");
 			return false;
 		}
 		const string dotnetHost = "/usr/local/share/dotnet/dotnet";
@@ -240,12 +240,20 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 	internal static bool OwnsListeningPort(int childPid, int port) {
 		try {
 			using var probe = new Process { StartInfo = new ProcessStartInfo("/usr/sbin/lsof") {
-				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = false,
 				ArgumentList = { "-nP", "-iTCP:" + port, "-sTCP:LISTEN", "-F", "pfn" },
 			} };
+			probe.StartInfo.Environment.Clear();
 			if(!probe.Start()) return false;
-			if(!probe.WaitForExit(3000)) return false; // never kill any process (including the read-only probe)
-			return probe.ExitCode == 0 && ListenerRecordsContain(childPid, port, probe.StandardOutput.ReadToEnd());
+			try {
+				var read = probe.StandardOutput.ReadToEndAsync();
+				if(!probe.WaitForExit(3000) || !read.Wait(500)) return false;
+				return probe.ExitCode == 0 && read.Result.Length <= 8192 && ListenerRecordsContain(childPid, port, read.Result);
+			} finally {
+				if(!probe.HasExited) {
+					try { probe.Kill(); probe.WaitForExit(1000); } catch { /* Only exact owned lsof child. */ }
+				}
+			}
 		} catch { return false; }
 	}
 

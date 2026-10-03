@@ -18,7 +18,7 @@ $source=Get-Content (Join-Path $repo 'src/Ainur.Supervisor/Supervisor.cs') -Raw
 $program=Get-Content (Join-Path $repo 'src/Ainur.Supervisor/Program.cs') -Raw
 if($program -notmatch 'HOLD_NO_SPAWN: source-build is disabled' -or $program -notmatch 'CLI activation disabled' -or
    $source -notmatch 'StrictReleaseGate\.Verify\(releaseId, dir, out var reason\)' -or
-   $source -notmatch 'StrictReleaseGate\.VerifyProtectedInstall\(releaseId, dir, StrictReleaseGate\.CurrentUid\(\), out reason\)' -or
+   $source -notmatch 'StrictReleaseGate\.VerifyControlledInstall\(releaseId, dir, StrictReleaseGate\.CurrentUid\(\), out reason\)' -or
    $source -notmatch 'StrictReleaseGate\.VerifyProtectedFile\(dotnetHost, StrictReleaseGate\.CurrentUid\(\)\)' -or
    $source -notmatch 'StrictReleaseGate\.SetStrictChildEnvironment\(psi\)' -or
    $source -notmatch 'StrictReleaseGate\.IsIndependentRollback\(req.ReleaseId, previous\)' -or

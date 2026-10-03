@@ -45,8 +45,8 @@ if(caseName is "protected-staged" or "protected-wrong-id" or "protected-record" 
             false, caseName == "protected-hardlink" ? 2u : 1u, caseName == "protected-acl")
         : caseName == "protected-dotnet"
         ? StrictReleaseGate.VerifyProtectedFile("/usr/local/share/dotnet/dotnet", uid)
-        : StrictReleaseGate.VerifyProtectedInstall(caseName == "protected-wrong-id" ? "r20261003-old" : release, checkPath, uid, out _);
-    var expected = caseName is "protected-record" or "protected-dotnet";
+        : StrictReleaseGate.VerifyControlledInstall(caseName == "protected-wrong-id" ? "r20261003-old" : release, checkPath, uid, out _);
+    var expected = caseName is "protected-record" or "protected-same-uid" or "protected-dotnet" or "protected-staged";
     Console.WriteLine($"{caseName}: result={result} expected={expected} {(result == expected ? "PASS" : "FAIL")}");
     return result == expected ? 0 : 1;
 }

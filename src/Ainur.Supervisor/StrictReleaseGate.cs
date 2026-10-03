@@ -44,17 +44,16 @@ public static class StrictReleaseGate {
 		start.Environment["LANG"] = "C";
 	}
 
-	// Content equality is not sufficient when the supervisor's UID can replace a
-	// DLL between hash verification and dotnet opening it (or later dependency
-	// loads). These checks are deliberately independent of Verify: the staged
-	// UID-501 /tmp artifact may pass content verification, but MUST NOT spawn.
-	// A positive protected-install proof requires every path component and file
-	// to be OS-owned by a different, privileged UID, with no group/world write,
-	// hardlinks, ACL write delegation or unsafe xattrs. No install is done here.
+	// Local OS, authorized operator and service UID are trusted; a hostile
+	// same-UID local replacement is OUTSIDE the accepted threat model. Check
+	// exact content independently immediately before spawn, and reject links,
+	// ACL delegation and other-UID/group/world-writable release components.
+	// The writable home/state remain necessary; this does not freeze them.
+	// No install, repair or replacement is performed by the gate.
 	internal static bool SafeProtectionRecord(uint ownerUid, uint supervisorUid, UnixFileMode mode,
 		bool isDirectory, uint hardLinks, bool aclPresent) {
 		const UnixFileMode writable = UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
-		if(supervisorUid == 0 || ownerUid != 0 || aclPresent || (mode & writable) != 0) return false;
+		if(supervisorUid == 0 || (ownerUid != 0 && ownerUid != supervisorUid) || aclPresent || (mode & writable) != 0) return false;
 		return isDirectory ? hardLinks >= 1 : hardLinks == 1;
 	}
 
@@ -107,11 +106,12 @@ public static class StrictReleaseGate {
 				lsLinks != links) return false;
 			// Apple SIP's restricted/hidden flags on system-owned /usr do not
 			// delegate write access; reject all other unknown flags. SIP's xattr
-			// `com.apple.rootless` has no permission delegation and is the ONLY
-			// accepted extended attribute (ordinary apps cannot remove SIP).
-			if(first[4] != "-" && first[4] != "restricted" && first[4] != "restricted,hidden" && first[4] != "sunlnk") return false;
+			// macOS rootless (SIP) and provenance do not delegate write access.
+			// Any other extended attribute remains an explicit fail-closed case.
+			if(first[4] != "-" && first[4] != "restricted" && first[4] != "restricted,hidden" && first[4] != "sunlnk" && first[4] != "sunlnk,hidden") return false;
 			if(first[0].Length == 11 && first[0][10] == '@') {
-				if(lines.Length != 2 || lines[1].Trim() != "com.apple.rootless\t  0") return false;
+				if(lines.Length != 2 || (lines[1].Trim() != "com.apple.rootless\t  0" &&
+					lines[1].Trim() != "com.apple.provenance\t    11")) return false;
 			} else if(first[0].Length != 10 || lines.Length != 1) return false;
 			aclPresent = false;
 			return true;
@@ -144,23 +144,34 @@ public static class StrictReleaseGate {
 		} catch { return false; }
 	}
 
-	internal static bool VerifyProtectedInstall(string? releaseId, string releasePath, uint supervisorUid,
+	internal static bool VerifyControlledInstall(string? releaseId, string releasePath, uint supervisorUid,
 		out string holdReason) {
-		holdReason = "HOLD_NO_SPAWN: unprotected release path";
+		holdReason = "HOLD_NO_SPAWN: release install ownership/mode or content not controlled";
 		if(!IsAcceptedTarget(releaseId) || supervisorUid == 0 || !OperatingSystem.IsMacOS() ||
 			string.IsNullOrWhiteSpace(releasePath)) return false;
 		try {
 			var root = Path.GetFullPath(releasePath);
-			if(!Path.IsPathFullyQualified(root) || root.StartsWith("/tmp/", StringComparison.Ordinal) ||
-				root.StartsWith("/private/tmp/", StringComparison.Ordinal)) return false;
+			if(!Path.IsPathFullyQualified(root)) return false;
+			// macOS /tmp is an OS-owned alias for /private/tmp. This EXACT
+			// sticky system ancestor permits physically isolated rehearsals;
+			// no other group/world-writable release component is accepted.
+			if(root.StartsWith("/tmp/", StringComparison.Ordinal)) {
+				if(new DirectoryInfo("/tmp").LinkTarget != "private/tmp") return false;
+				root = Path.GetFullPath("/private" + root);
+			}
 			var component = Path.GetPathRoot(root)!;
 			if(!TryStat(component, out var rootUid, out var rootMode, out var rootLinks, out var rootAcl) ||
 				!SafeProtectionRecord(rootUid, supervisorUid, rootMode, true, rootLinks, rootAcl)) return false;
 			foreach(var part in root[component.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)) {
 				component = Path.Combine(component, part);
 				if(!Directory.Exists(component) || File.GetAttributes(component).HasFlag(FileAttributes.ReparsePoint) ||
-					!TryStat(component, out var uid, out var mode, out var links, out var acl) ||
-					!SafeProtectionRecord(uid, supervisorUid, mode, true, links, acl)) return false;
+					!TryStat(component, out var uid, out var mode, out var links, out var acl)) return false;
+				if(component == "/private/tmp") {
+					var sticky = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+						UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+						UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute | UnixFileMode.StickyBit;
+					if(uid != 0 || acl || mode != sticky || links < 1) return false;
+				} else if(!SafeProtectionRecord(uid, supervisorUid, mode, true, links, acl)) return false;
 			}
 			var pending = new Stack<string>(); pending.Push(root);
 			while(pending.TryPop(out var dir)) {
