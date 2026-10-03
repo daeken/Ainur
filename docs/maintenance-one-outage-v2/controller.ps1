@@ -28,12 +28,11 @@ function ReadRouteProof([object]$f,[object]$m){
  Require (-not [IO.File]::Exists($proofPath)) 'route proof already exists; no overwrite'
  $ack=InvokeOp 'route-attestation' @{pid=$f.child.pid;started=$f.child.started;release=$f.release;generation=$f.generation;proofPath=$proofPath}
  Require ($ack.independentProofSha -match '^[a-fA-F0-9]{64}$' -and $ack.proofPath -ceq $proofPath) 'route artifact hash/path missing'
- $fi=[IO.FileInfo]::new($proofPath)
- Require ($fi.Exists -and -not $fi.LinkTarget -and $fi.Length -gt 2 -and $fi.Length -le 4096) 'route artifact absent/link/oversize'
- $mode=[IO.File]::GetUnixFileMode($proofPath)
- Require (($mode -band ([IO.UnixFileMode]::GroupRead -bor [IO.UnixFileMode]::GroupWrite -bor [IO.UnixFileMode]::GroupExecute -bor [IO.UnixFileMode]::OtherRead -bor [IO.UnixFileMode]::OtherWrite -bor [IO.UnixFileMode]::OtherExecute)) -eq 0) 'route artifact mode not private'
- Require ((Get-FileHash -LiteralPath $proofPath -Algorithm SHA256).Hash -ceq $ack.independentProofSha) 'route artifact bytes/SHA mismatch'
- $raw=[IO.File]::ReadAllText($proofPath,[Text.Encoding]::UTF8)
+ # Single native FD: O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC, fstat owned 0600
+ # regular nlink=1, length 3..4096; read and hash the exact same FD bytes.
+ $bytes=[AinurRouteProofFd]::Read($proofPath,[string]$ack.independentProofSha)
+ $utf8=[Text.UTF8Encoding]::new($false,$true)
+ $raw=$utf8.GetString($bytes)
  $route=$raw|ConvertFrom-Json
  $keys=@($route.PSObject.Properties.Name|Sort-Object)
  $want=@('core_sha256','generation','process_id','process_started_utc','provider_policy','release','route_class')
@@ -72,6 +71,9 @@ function AssertSupervisor([object]$f,[object]$m,[bool]$allowChild){
 $script:authorizedOps=@('old-facts','preflight-backup','work-classification','drain','disable-label','disabled-status','kill-old-parent-exact','after-parent-facts','stop-old-child-graceful','after-child-facts','kill-old-child-exact','stopped-backup','install-protected','new-spawn-status','enable-label','bootstrap-once','new-facts','activate-candidate','upgrade-status','route-attestation','snapshot-compare','forensic-status','final-facts')
 $script:adapterPath=(Resolve-Path -LiteralPath $Adapter).Path
 $m=Get-Content -LiteralPath $Manifest -Raw|ConvertFrom-Json
+$proofSource=Join-Path $PSScriptRoot 'route-proof-fd.cs'
+Require ($m.routeProofSourceSha -ceq (Get-FileHash -LiteralPath $proofSource -Algorithm SHA256).Hash) 'native single-FD proof source hash drift'
+Add-Type -Path $proofSource -ErrorAction Stop
 Require ($m.planVersion -ceq 'one-outage-v2' -and $m.label -ceq 'gui/501/com.ainur.supervisor.5181' -and
  $m.home -ceq '/Users/daeken/projects/Ainur/src/Ainur.Server/.ainur/dev' -and
  [int]$m.port -eq 5181 -and $m.expectedRelease -ceq 'r20261002014730-766fa9f930' -and
@@ -84,6 +86,10 @@ if($TestMode){
  $m.adapterHash -ceq (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'mock-adapter.ps1')).Hash -and
  $m.liveApproved -eq $false) 'test mode restricted to frozen mock only'
 }else{
+ # Root strict-only policy supersedes legacy 766/01d6 offline mock rollback pins.
+ # NO native adapter can run until independently accepted BOTH running and automatic
+ # rollback/recovery strict releases are re-pinned in reviewed controller source.
+ Require $false 'strict candidate + automatic rollback/recovery target not pinned; legacy 766/e022 unsafe'
  Require ($m.liveApproved -eq $true -and $m.detachedOwner -and $m.independentGateSha -and $m.managerGoSha) 'not authorized for native adapter'
  Require ($m.approvedNativeAdapterHash -ceq $m.adapterHash) 'native adapter hash not independently approved'
 }

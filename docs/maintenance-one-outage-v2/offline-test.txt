@@ -12,4 +12,11 @@ PASS backup-failed exit=1 receipts=3 ops=2 retryBlocked=1
 PASS child-survives exit=1 receipts=8 ops=12 retryBlocked=1
 PASS install-failed exit=1 receipts=11 ops=15 retryBlocked=1
 PASS: 13 offline adapter-invocation cases; NO native adapter supplied, NO live controls
-exit=0
+controller exit=0
+PASS owned private single-link regular same-FD SHA read
+PASS reject forged digest
+PASS reject FIFO nonblocking
+PASS reject hardlink nlink2
+PASS reject symlink nofollow
+PASS path replace adversary after verified fstat: FD bytes remain original
+singleFD exit=0

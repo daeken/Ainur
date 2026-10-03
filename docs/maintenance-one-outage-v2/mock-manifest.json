@@ -39,5 +39,6 @@
   "riskApproval": "interrupted-turn-and-admission-race-accepted",
   "adapterHash": "C072BD615E9606F2C1C672678AEF8FE35632439B5094DE482DF07A191FE70A2A",
   "supervisorSource": "254065c008e0ef61565971ebccfa11462c262e01",
-  "planVersion": "one-outage-v2"
+  "planVersion": "one-outage-v2",
+  "routeProofSourceSha": "C65ED130816D742CBE15509FBE7745C040574007498DEDBB9856762E7916A1B1"
 }
