@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace Ainur.Supervisor;
 
@@ -28,6 +29,21 @@ public static class StrictReleaseGate {
 		// NO SECOND approved distinct payload or strict receipt exists. Fail closed.
 		false;
 
+	// Child launch has an explicit allowlist, not an inherited environment with
+	// selected entries overwritten. This includes .NET host and native loader
+	// configuration: no DOTNET_*, CORECLR_*, COMPlus_*, DYLD_*, LD_*,
+	// ASPNETCORE_*, or provider credential/paid-route override can pass through.
+	// Only values independently pinned here enter the runtime child. No native
+	// launch is enabled unless the other content/install/owner gates also pass.
+	internal static void SetStrictChildEnvironment(ProcessStartInfo start) {
+		start.Environment.Clear();
+		start.Environment["AINUR_OPENAI_ROUTE"] = "subscription";
+		start.Environment["AINUR_SUPERVISED"] = "1";
+		start.Environment["HOME"] = "/Users/daeken";
+		start.Environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin";
+		start.Environment["LANG"] = "C";
+	}
+
 	// Content equality is not sufficient when the supervisor's UID can replace a
 	// DLL between hash verification and dotnet opening it (or later dependency
 	// loads). These checks are deliberately independent of Verify: the staged
@@ -42,6 +58,31 @@ public static class StrictReleaseGate {
 		return isDirectory ? hardLinks >= 1 : hardLinks == 1;
 	}
 
+	// Bounded exact system probe. Asynchronous pipe drain prevents a child that
+	// writes into its pipe from blocking our timed wait. On timeout only the
+	// exact child started here is killed; no unrelated process/tree is targeted.
+	static bool TrySystemProbe(string executable, string[] arguments, out string output) {
+		output = "";
+		try {
+			using var process = new Process { StartInfo = new ProcessStartInfo(executable) {
+				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = false,
+			} };
+			process.StartInfo.Environment.Clear();
+			foreach(var arg in arguments) process.StartInfo.ArgumentList.Add(arg);
+			if(!process.Start()) return false;
+			try {
+				var read = process.StandardOutput.ReadToEndAsync();
+				if(!process.WaitForExit(2000) || !read.Wait(500)) return false;
+				output = read.Result;
+				return process.ExitCode == 0 && output.Length <= 8192;
+			} finally {
+				if(!process.HasExited) {
+					try { process.Kill(); process.WaitForExit(1000); } catch { /* fail closed; only exact probe child targeted */ }
+				}
+			}
+		} catch { return false; }
+	}
+
 	// Darwin-specific protection proof. Never claim a protected installation on
 	// another OS or when stat/ACL inspection is unavailable or ambiguous.
 	// stat reports owner, raw mode, hard-link count; ls -ldeO@ reports macOS ACL
@@ -50,28 +91,15 @@ public static class StrictReleaseGate {
 		uid = links = 0; aclPresent = true; mode = default;
 		if(!OperatingSystem.IsMacOS()) return false;
 		try {
-			using var process = new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/stat") {
-				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
-			} };
-			process.StartInfo.ArgumentList.Add("-f");
-			process.StartInfo.ArgumentList.Add("%u|%p|%l");
-			process.StartInfo.ArgumentList.Add(path);
-			if(!process.Start()) return false;
-			var line = process.StandardOutput.ReadToEnd().Trim();
-			if(!process.WaitForExit(2000) || process.ExitCode != 0) return false;
+			if(!TrySystemProbe("/usr/bin/stat", ["-f", "%u|%p|%l", path], out var statOutput)) return false;
+			var line = statOutput.Trim();
 			var parts = line.Split('|');
 			if(parts.Length != 3 || !uint.TryParse(parts[0], out uid) ||
 				!uint.TryParse(parts[2], out links)) return false;
 			var rawMode = Convert.ToUInt32(parts[1], 8);
 			mode = (UnixFileMode) (rawMode & 0xFFF);
-			using var ls = new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo("/bin/ls") {
-				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
-			} };
-			ls.StartInfo.ArgumentList.Add("-ldeO@");
-			ls.StartInfo.ArgumentList.Add(path);
-			if(!ls.Start()) return false;
-			var detail = ls.StandardOutput.ReadToEnd().TrimEnd();
-			if(!ls.WaitForExit(2000) || ls.ExitCode != 0) return false;
+			if(!TrySystemProbe("/bin/ls", ["-ldeO@", path], out var lsOutput)) return false;
+			var detail = lsOutput.TrimEnd();
 			var lines = detail.Split('\n');
 			var first = lines[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
 			if(first.Length < 7 || first[0].Length is not (10 or 11) ||
@@ -92,15 +120,7 @@ public static class StrictReleaseGate {
 
 	internal static uint CurrentUid() {
 		if(!OperatingSystem.IsMacOS()) return 0;
-		try {
-			using var process = new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/id") {
-				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
-			} };
-			process.StartInfo.ArgumentList.Add("-u");
-			if(!process.Start()) return 0;
-			var output = process.StandardOutput.ReadToEnd().Trim();
-			return process.WaitForExit(2000) && process.ExitCode == 0 && uint.TryParse(output, out var uid) ? uid : 0;
-		} catch { return 0; }
+		return TrySystemProbe("/usr/bin/id", ["-u"], out var output) && uint.TryParse(output.Trim(), out var uid) ? uid : 0;
 	}
 
 	internal static bool VerifyProtectedFile(string path, uint supervisorUid) {

@@ -206,14 +206,13 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			return false;
 		}
 		var psi = new ProcessStartInfo(dotnetHost) { UseShellExecute = false, WorkingDirectory = dir };
+		StrictReleaseGate.SetStrictChildEnvironment(psi);
 		psi.ArgumentList.Add(Path.Combine(dir, "Ainur.Server.dll"));
 		psi.ArgumentList.Add("--home"); psi.ArgumentList.Add(opts.Home);
 		psi.ArgumentList.Add("--port"); psi.ArgumentList.Add(opts.Port.ToString());
 		psi.ArgumentList.Add("--release"); psi.ArgumentList.Add(releaseId);
-		// Pin the paid-route exclusion on EVERY spawn (initial, crash restart, candidate, rollback).
-		// Never trust the loaded launchd parent's possibly stale environment.
-		psi.Environment["AINUR_OPENAI_ROUTE"] = "subscription";
-		psi.Environment["AINUR_SUPERVISED"] = "1";
+		// Environment is already sanitized and pinned before any Process.Start;
+		// never inherit launchd parent's .NET/native loader, provider, or auth knobs.
 		Runtime = Process.Start(psi)!;
 		RunningRelease = releaseId;
 		RunningGeneration = null;

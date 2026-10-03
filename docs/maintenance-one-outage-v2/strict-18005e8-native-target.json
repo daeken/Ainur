@@ -38,13 +38,14 @@
     "port": 5181,
     "historicalInstalledReleasePath": "<same home>/supervisor/releases/r20261003-ulmo-fullui-18005e8-4d6baf032671 — NOT eligible while any UID501-writable ancestor exists",
     "installedReleaseState": "NOT_VERIFIED; no copy/install/launchd action authorized or done; separate privileged OS-owned protected root and supervisor path refactor required",
-    "preSpawn": "Supervisor.StrictReleaseGate.Verify exact 471 files + VerifyProtectedInstall root-owned nonwritable ancestry+files and VerifyProtectedFile /usr/local/share/dotnet/dotnet before every StartRuntime; upgrade and rollback also pre-drain gated",
+    "preSpawn": "Supervisor.StrictReleaseGate.Verify exact 471 files + VerifyProtectedInstall root-owned nonwritable ancestry+files and VerifyProtectedFile /usr/local/share/dotnet/dotnet before every StartRuntime; explicit ProcessStartInfo.Environment.Clear and fixed five-entry AINUR_OPENAI_ROUTE=subscription, AINUR_SUPERVISED=1, HOME=/Users/daeken, PATH=/usr/bin:/bin:/usr/sbin:/sbin, LANG=C child allowlist excludes all parent loader/profile/credential knobs; upgrade and rollback also pre-drain gated",
+    "bootstrapPrecondition": "Supervisor itself and dotnet host/framework launch before source gate; privileged operator must independently attest trusted launchd environment without DYLD/DOTNET/CORECLR/COMPlus/loader hooks and OS-protected supervisor binary/framework dependencies. This source cannot sanitize its own pre-Main bootstrap.",
     "toctou": "hash→dotnet DLL path cannot be closed in UID501-writable release/ancestor. Both protected root-owned *all ancestors/files* and reviewed deployment/release-path constructor are mandatory. Staged /tmp valid 471 artifact passes content check but protected-install rejects; NO executable path yet.",
     "spawnLease": "Existing one-use supervisor lease independently required; do not reset from a failed attempt"
   },
   "outageController": {
     "existingV2Controller": "mock-only; legacy target pins remain for offline historical regression; non-test branch unconditionally refuses native adapter",
-    "nativeAdapterStatus": "NOT_SUPPLIED, NOT_AUTHORIZED: one accepted image and UID501-writable current release home make safe normal path impossible without privileged protected install and separate detached owner",
+    "nativeAdapterStatus": "NOT_SUPPLIED, NOT_AUTHORIZED: one accepted image and UID501-writable current release home make safe normal path impossible without privileged protected install, trusted bootstrap, and separate detached owner",
     "proposedNativeOutcome": "NO_GO until privileged operator-created root-owned/no-ACL+no-extra-xattr 471 release under root-owned ancestors, reviewed separately pinned absolute release path, operator-owned process/DB/control baseline, detached adapter/code hash, immutable install attestations, route proof, backup + recovery, independent Yavanna+Namo gate, manager/root explicit execution GO",
     "noLiveActions": true
   }
