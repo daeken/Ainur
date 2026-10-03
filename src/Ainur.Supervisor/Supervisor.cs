@@ -195,11 +195,17 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		if(InterventionRequired || Runtime is { HasExited: false })
 			throw new InvalidOperationException("Cannot start another runtime while a child is alive or intervention is required");
 		var dir = releases.PathFor(releaseId);
-		if(!StrictReleaseGate.Verify(releaseId, dir, out var reason)) {
-			RequireIntervention($"HOLD_NO_SPAWN: {reason}; strict full-payload release gate failed for {releaseId}");
+		if(!StrictReleaseGate.Verify(releaseId, dir, out var reason) ||
+			!StrictReleaseGate.VerifyProtectedInstall(releaseId, dir, StrictReleaseGate.CurrentUid(), out reason)) {
+			RequireIntervention($"HOLD_NO_SPAWN: {reason}; strict full-payload/protected-install gate failed for {releaseId}");
 			return false;
 		}
-		var psi = new ProcessStartInfo("dotnet") { UseShellExecute = false, WorkingDirectory = dir };
+		const string dotnetHost = "/usr/local/share/dotnet/dotnet";
+		if(!StrictReleaseGate.VerifyProtectedFile(dotnetHost, StrictReleaseGate.CurrentUid())) {
+			RequireIntervention("HOLD_NO_SPAWN: dotnet executable/ancestor is not protected");
+			return false;
+		}
+		var psi = new ProcessStartInfo(dotnetHost) { UseShellExecute = false, WorkingDirectory = dir };
 		psi.ArgumentList.Add(Path.Combine(dir, "Ainur.Server.dll"));
 		psi.ArgumentList.Add("--home"); psi.ArgumentList.Add(opts.Home);
 		psi.ArgumentList.Add("--port"); psi.ArgumentList.Add(opts.Port.ToString());

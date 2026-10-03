@@ -5,6 +5,21 @@ using Ainur.Supervisor;
 var root = args[0];
 var caseName = args[1];
 var release = StrictReleaseGate.ReleaseId;
+if(caseName is "protected-staged" or "protected-wrong-id" or "protected-record" or "protected-same-uid" or "protected-group-write" or "protected-acl" or "protected-hardlink" or "protected-dotnet") {
+    var uid = StrictReleaseGate.CurrentUid();
+    if(uid == 0) throw new Exception("unsafe/root test identity");
+    var checkPath = root;
+    var result = caseName is "protected-record" or "protected-same-uid" or "protected-group-write" or "protected-acl" or "protected-hardlink"
+        ? StrictReleaseGate.SafeProtectionRecord(caseName == "protected-same-uid" ? uid : 0, uid,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | (caseName == "protected-group-write" ? UnixFileMode.GroupWrite : 0),
+            false, caseName == "protected-hardlink" ? 2u : 1u, caseName == "protected-acl")
+        : caseName == "protected-dotnet"
+        ? StrictReleaseGate.VerifyProtectedFile("/usr/local/share/dotnet/dotnet", uid)
+        : StrictReleaseGate.VerifyProtectedInstall(caseName == "protected-wrong-id" ? "r20261003-old" : release, checkPath, uid, out _);
+    var expected = caseName is "protected-record" or "protected-dotnet";
+    Console.WriteLine($"{caseName}: result={result} expected={expected} {(result == expected ? "PASS" : "FAIL")}");
+    return result == expected ? 0 : 1;
+}
 string? scratch = null;
 try {
     if(caseName is "tampered" or "extra" or "link" or "extra-directory") {

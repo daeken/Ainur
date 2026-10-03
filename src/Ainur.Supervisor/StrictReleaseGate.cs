@@ -28,6 +28,135 @@ public static class StrictReleaseGate {
 		// NO SECOND approved distinct payload or strict receipt exists. Fail closed.
 		false;
 
+	// Content equality is not sufficient when the supervisor's UID can replace a
+	// DLL between hash verification and dotnet opening it (or later dependency
+	// loads). These checks are deliberately independent of Verify: the staged
+	// UID-501 /tmp artifact may pass content verification, but MUST NOT spawn.
+	// A positive protected-install proof requires every path component and file
+	// to be OS-owned by a different, privileged UID, with no group/world write,
+	// hardlinks, ACL write delegation or unsafe xattrs. No install is done here.
+	internal static bool SafeProtectionRecord(uint ownerUid, uint supervisorUid, UnixFileMode mode,
+		bool isDirectory, uint hardLinks, bool aclPresent) {
+		const UnixFileMode writable = UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
+		if(supervisorUid == 0 || ownerUid != 0 || aclPresent || (mode & writable) != 0) return false;
+		return isDirectory ? hardLinks >= 1 : hardLinks == 1;
+	}
+
+	// Darwin-specific protection proof. Never claim a protected installation on
+	// another OS or when stat/ACL inspection is unavailable or ambiguous.
+	// stat reports owner, raw mode, hard-link count; ls -ldeO@ reports macOS ACL
+	// and file flags (+ marks ACL). Unknown output is fail-closed.
+	static bool TryStat(string path, out uint uid, out UnixFileMode mode, out uint links, out bool aclPresent) {
+		uid = links = 0; aclPresent = true; mode = default;
+		if(!OperatingSystem.IsMacOS()) return false;
+		try {
+			using var process = new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/stat") {
+				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+			} };
+			process.StartInfo.ArgumentList.Add("-f");
+			process.StartInfo.ArgumentList.Add("%u|%p|%l");
+			process.StartInfo.ArgumentList.Add(path);
+			if(!process.Start()) return false;
+			var line = process.StandardOutput.ReadToEnd().Trim();
+			if(!process.WaitForExit(2000) || process.ExitCode != 0) return false;
+			var parts = line.Split('|');
+			if(parts.Length != 3 || !uint.TryParse(parts[0], out uid) ||
+				!uint.TryParse(parts[2], out links)) return false;
+			var rawMode = Convert.ToUInt32(parts[1], 8);
+			mode = (UnixFileMode) (rawMode & 0xFFF);
+			using var ls = new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo("/bin/ls") {
+				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+			} };
+			ls.StartInfo.ArgumentList.Add("-ldeO@");
+			ls.StartInfo.ArgumentList.Add(path);
+			if(!ls.Start()) return false;
+			var detail = ls.StandardOutput.ReadToEnd().TrimEnd();
+			if(!ls.WaitForExit(2000) || ls.ExitCode != 0) return false;
+			var lines = detail.Split('\n');
+			var first = lines[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+			if(first.Length < 7 || first[0].Length is not (10 or 11) ||
+				first[0][0] is not ('-' or 'd') || !uint.TryParse(first[1], out var lsLinks) ||
+				lsLinks != links) return false;
+			// Apple SIP's restricted/hidden flags on system-owned /usr do not
+			// delegate write access; reject all other unknown flags. SIP's xattr
+			// `com.apple.rootless` has no permission delegation and is the ONLY
+			// accepted extended attribute (ordinary apps cannot remove SIP).
+			if(first[4] != "-" && first[4] != "restricted" && first[4] != "restricted,hidden" && first[4] != "sunlnk") return false;
+			if(first[0].Length == 11 && first[0][10] == '@') {
+				if(lines.Length != 2 || lines[1].Trim() != "com.apple.rootless\t  0") return false;
+			} else if(first[0].Length != 10 || lines.Length != 1) return false;
+			aclPresent = false;
+			return true;
+		} catch { return false; }
+	}
+
+	internal static uint CurrentUid() {
+		if(!OperatingSystem.IsMacOS()) return 0;
+		try {
+			using var process = new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/id") {
+				UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+			} };
+			process.StartInfo.ArgumentList.Add("-u");
+			if(!process.Start()) return 0;
+			var output = process.StandardOutput.ReadToEnd().Trim();
+			return process.WaitForExit(2000) && process.ExitCode == 0 && uint.TryParse(output, out var uid) ? uid : 0;
+		} catch { return 0; }
+	}
+
+	internal static bool VerifyProtectedFile(string path, uint supervisorUid) {
+		if(supervisorUid == 0 || !OperatingSystem.IsMacOS() || string.IsNullOrWhiteSpace(path)) return false;
+		try {
+			var full = Path.GetFullPath(path);
+			if(!Path.IsPathFullyQualified(full) || full.StartsWith("/tmp/", StringComparison.Ordinal) ||
+				full.StartsWith("/private/tmp/", StringComparison.Ordinal)) return false;
+			var component = Path.GetPathRoot(full)!;
+			if(!TryStat(component, out var uid, out var mode, out var links, out var acl) ||
+				!SafeProtectionRecord(uid, supervisorUid, mode, true, links, acl)) return false;
+			var relative = full[component.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+			for(var i = 0; i < relative.Length; ++i) {
+				component = Path.Combine(component, relative[i]);
+				var isDir = i != relative.Length - 1;
+				if(File.GetAttributes(component).HasFlag(FileAttributes.ReparsePoint) ||
+					!TryStat(component, out uid, out mode, out links, out acl) ||
+					!SafeProtectionRecord(uid, supervisorUid, mode, isDir, links, acl)) return false;
+			}
+			return relative.Length > 0 && File.Exists(full);
+		} catch { return false; }
+	}
+
+	internal static bool VerifyProtectedInstall(string? releaseId, string releasePath, uint supervisorUid,
+		out string holdReason) {
+		holdReason = "HOLD_NO_SPAWN: unprotected release path";
+		if(!IsAcceptedTarget(releaseId) || supervisorUid == 0 || !OperatingSystem.IsMacOS() ||
+			string.IsNullOrWhiteSpace(releasePath)) return false;
+		try {
+			var root = Path.GetFullPath(releasePath);
+			if(!Path.IsPathFullyQualified(root) || root.StartsWith("/tmp/", StringComparison.Ordinal) ||
+				root.StartsWith("/private/tmp/", StringComparison.Ordinal)) return false;
+			var component = Path.GetPathRoot(root)!;
+			if(!TryStat(component, out var rootUid, out var rootMode, out var rootLinks, out var rootAcl) ||
+				!SafeProtectionRecord(rootUid, supervisorUid, rootMode, true, rootLinks, rootAcl)) return false;
+			foreach(var part in root[component.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)) {
+				component = Path.Combine(component, part);
+				if(!Directory.Exists(component) || File.GetAttributes(component).HasFlag(FileAttributes.ReparsePoint) ||
+					!TryStat(component, out var uid, out var mode, out var links, out var acl) ||
+					!SafeProtectionRecord(uid, supervisorUid, mode, true, links, acl)) return false;
+			}
+			var pending = new Stack<string>(); pending.Push(root);
+			while(pending.TryPop(out var dir)) {
+				foreach(var entry in Directory.EnumerateFileSystemEntries(dir)) {
+					var attrs = File.GetAttributes(entry);
+					if(attrs.HasFlag(FileAttributes.ReparsePoint) ||
+						!TryStat(entry, out var uid, out var mode, out var links, out var acl) ||
+						!SafeProtectionRecord(uid, supervisorUid, mode, attrs.HasFlag(FileAttributes.Directory), links, acl))
+						return false;
+					if(attrs.HasFlag(FileAttributes.Directory)) pending.Push(entry);
+				}
+			}
+			return true;
+		} catch { return false; }
+	}
+
 	static bool RegularFile(string path) => File.Exists(path) &&
 		!File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint);
 

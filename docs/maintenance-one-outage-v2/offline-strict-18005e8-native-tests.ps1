@@ -18,6 +18,8 @@ $source=Get-Content (Join-Path $repo 'src/Ainur.Supervisor/Supervisor.cs') -Raw
 $program=Get-Content (Join-Path $repo 'src/Ainur.Supervisor/Program.cs') -Raw
 if($program -notmatch 'HOLD_NO_SPAWN: source-build is disabled' -or $program -notmatch 'CLI activation disabled' -or
    $source -notmatch 'StrictReleaseGate\.Verify\(releaseId, dir, out var reason\)' -or
+   $source -notmatch 'StrictReleaseGate\.VerifyProtectedInstall\(releaseId, dir, StrictReleaseGate\.CurrentUid\(\), out reason\)' -or
+   $source -notmatch 'StrictReleaseGate\.VerifyProtectedFile\(dotnetHost, StrictReleaseGate\.CurrentUid\(\)\)' -or
    $source -notmatch 'StrictReleaseGate\.IsIndependentRollback\(req.ReleaseId, previous\)' -or
    $source -match 'releases\.BuildAsync|selecting newest built release') { throw 'SPAWN_PATH_NOT_GATED' }
 $binary=Join-Path $repo 'src/Ainur.Supervisor/bin/Debug/net10.0/Ainur.Supervisor.dll'
@@ -25,7 +27,7 @@ if(!(Test-Path $binary)){throw 'SUPERVISOR_BUILD_REQUIRED'}
 $out=@(dotnet $binary build 2>&1)
 if($LASTEXITCODE -ne 3 -or @($out|Where-Object {$_ -match 'HOLD_NO_SPAWN'}).Count -ne 1){throw "CLI_BUILD_NOT_DISABLED $($out -join '; ')"}
 'PASS native CLI source-build rejects before home access'
-foreach($case in @('valid','old-e022','old-766','old-461','missing','tampered','extra','link','extra-directory')){
+foreach($case in @('valid','old-e022','old-766','old-461','missing','tampered','extra','link','extra-directory','protected-staged','protected-wrong-id','protected-record','protected-same-uid','protected-group-write','protected-acl','protected-hardlink','protected-dotnet')){
  $out=@(dotnet run --no-restore --project $fixture -- $stage $case 2>&1)
  if($LASTEXITCODE -ne 0 -or @($out|Where-Object {$_ -match 'FAIL'}).Count -ne 0 -or @($out|Where-Object {$_ -match ' PASS$'}).Count -ne 1){throw "FAIL $case $($out -join '; ')"}
  $out[-1]
