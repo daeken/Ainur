@@ -90,10 +90,13 @@ try {
 	$psi = [Diagnostics.ProcessStartInfo]::new($exe)
 	$psi.WorkingDirectory = $release
 	$psi.UseShellExecute = $false
+	$psi.Environment['AINUR_VALIDATION'] = '1'
+	$psi.Environment['AINUR_OPENAI_ROUTE'] = 'subscription'
 	$psi.RedirectStandardOutput = $true
 	$psi.RedirectStandardError = $true
 	foreach($arg in @('--home',$scratchHome,'--port',"$Port",'--release',$ExpectedReleaseId) + $ChildArguments) { $psi.ArgumentList.Add($arg) }
 	if($psi.FileName -cne $exe -or $psi.WorkingDirectory -cne $release -or
+		$psi.Environment['AINUR_VALIDATION'] -cne '1' -or $psi.Environment['AINUR_OPENAI_ROUTE'] -cne 'subscription' -or
 		$psi.ArgumentList.Count -lt 6 -or $psi.ArgumentList[0] -cne '--home' -or
 		$psi.ArgumentList[2] -cne '--port' -or $psi.ArgumentList[3] -cne "$Port" -or
 		$psi.ArgumentList[4] -cne '--release' -or $psi.ArgumentList[5] -cne $ExpectedReleaseId -or
@@ -106,8 +109,12 @@ try {
 	$process = [Diagnostics.Process]::Start($psi)
 	$record.stage = 'launched'
 	$record.process_id = $process.Id
-	$record.process_started_utc = $process.StartTime.ToUniversalTime().ToString('O')
 	$record.process_executable = $exe
+	# A fast-exiting child can vanish before StartTime is readable. Never claim
+	# a successful/identified launch from only a PID and prelaunch timestamp.
+	try { $started = $process.StartTime } catch { $started = $null }
+	if($null -eq $started) { throw 'START_IDENTITY_UNAVAILABLE' }
+	$record.process_started_utc = $started.ToUniversalTime().ToString('O')
 	$process.WaitForExit(5000) | Out-Null
 	if(!$process.HasExited) { $process.Kill(); $process.WaitForExit() }
 	$record.exit_code = $process.ExitCode
