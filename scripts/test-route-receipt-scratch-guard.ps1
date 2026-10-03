@@ -1,11 +1,30 @@
-# Disposable offline guard tests: only bounded /bin/sleep and /usr/bin/true are started.
+# Disposable offline guard tests: bounded argument-checking dummy scripts and /usr/bin/true only.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $guard = Join-Path $PSScriptRoot 'route-receipt-scratch-guard.ps1'
 $fixture = "/tmp/ainur-rr-guard-fixture-$([Guid]::NewGuid().ToString('N'))"
 [IO.Directory]::CreateDirectory($fixture) | Out-Null
 [IO.File]::WriteAllText((Join-Path $fixture 'release.json'),'{"id":"rdummy1"}',[Text.UTF8Encoding]::new($false))
-[IO.File]::Copy('/bin/sleep',(Join-Path $fixture 'dummy'),$false)
+$launchLog = Join-Path $fixture 'dummy-launches'
+$dummy = Join-Path $fixture 'dummy'
+# The guard always prepends Ainur arguments. /bin/sleep cannot be a successful
+# fixture: it rejects --home/--port/--release and may vanish before StartTime.
+# This shell wrapper accepts only the exact expected argument shape, records
+# launch without secrets, then stays alive briefly for PID/StartTime capture.
+$dummyScript = @'
+#!/bin/sh
+[ "$#" -eq 7 ] || exit 41
+[ "$1" = '--home' ] || exit 42
+case "$2" in /tmp/ainur-rr-guard-*/home) ;; *) exit 43;; esac
+[ "$3" = '--port' ] && [ "$4" = '57001' ] || exit 44
+[ "$5" = '--release' ] && [ "$6" = 'rdummy1' ] || exit 45
+[ "$7" = '1' ] || exit 46
+[ "$AINUR_VALIDATION" = '1' ] && [ "$AINUR_OPENAI_ROUTE" = 'subscription' ] || exit 47
+printf 'launch\n' >> '__LAUNCH_LOG__'
+exec /bin/sleep 1
+'@.Replace('__LAUNCH_LOG__',$launchLog)
+[IO.File]::WriteAllText($dummy,$dummyScript+"`n",[Text.UTF8Encoding]::new($false))
+[IO.File]::SetUnixFileMode($dummy,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
 [IO.File]::Copy('/usr/bin/true',(Join-Path $fixture 'fast-dummy'),$false)
 $hash = (Get-FileHash (Join-Path $fixture 'dummy') -Algorithm SHA256).Hash
 $fastHash = (Get-FileHash (Join-Path $fixture 'fast-dummy') -Algorithm SHA256).Hash
@@ -44,6 +63,7 @@ foreach($case in $cases) {
 	$args = @{ TempRoot=$root; Executable=$exe; ReleaseDirectory=$(if($case.ContainsKey('missing')) { "/tmp/ainur-rr-missing-$([Guid]::NewGuid().ToString('N'))" } else { $fixture }); ExpectedExecutableSha256=$(if($case.ContainsKey('wrongHash')) { '0'*64 } elseif($case.ContainsKey('fast')) { $fastHash } elseif($case.ContainsKey('envDummy')) { $envHash } else { $hash }); ExpectedReleaseId='rdummy1'; Port=57001; EvidencePath=$evidence; ChildArguments=$(if($case.ContainsKey('fast') -or $case.ContainsKey('envDummy')) { @() } else { @('1') }) }
 	if($case.ContainsKey('override')) { $args.ChildArguments = @('--home','/Users/daeken') }
 	$outcome = $null
+	$launchesBefore = if(Test-Path -LiteralPath $launchLog) { @(Get-Content -LiteralPath $launchLog).Count } else { 0 }
 	$oldValidation = [Environment]::GetEnvironmentVariable('AINUR_VALIDATION')
 	$oldRoute = [Environment]::GetEnvironmentVariable('AINUR_OPENAI_ROUTE')
 	try {
@@ -55,6 +75,12 @@ foreach($case in $cases) {
 		[Environment]::SetEnvironmentVariable('AINUR_OPENAI_ROUTE',$oldRoute)
 	}
 	if($case.ContainsKey('envDummy') -and (Get-Content -LiteralPath $envResult -Raw).Trim() -cne 'PINNED') { throw 'CHILD_ENV_NOT_PINNED' }
+	$launchesAfter = if(Test-Path -LiteralPath $launchLog) { @(Get-Content -LiteralPath $launchLog).Count } else { 0 }
+	if($case.ContainsKey('fast') -or $case.ContainsKey('envDummy')) {
+		if($launchesAfter -ne $launchesBefore) { throw 'UNEXPECTED_DUMMY_LAUNCH' }
+	} elseif($case.expected -eq 'finished') {
+		if($launchesAfter -ne ($launchesBefore + 1)) { throw "POSITIVE_CHILD_NOT_LAUNCHED name=$name" }
+	} elseif($launchesAfter -ne $launchesBefore) { throw "SETUP_FAILURE_LAUNCHED_CHILD name=$name" }
 	if($case.ContainsKey('fast') -and $outcome -ceq 'finished') {
 		$captured = Get-Content $evidence -Raw | ConvertFrom-Json
 		if(!$captured.process_started_utc -or !$captured.stopped -or !$captured.process_id) { throw 'FAST_EXIT_FALSE_SUCCESS' }
