@@ -31,7 +31,7 @@ try{
 if(-not [IO.File]::Exists($Backup)){Fail 'backup not created'}
 [IO.File]::SetUnixFileMode($Backup,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
 # Integrity, selected persisted keysets, seven identities, paused Tulkas; minimal fixture schema.
-$verifySql="PRAGMA integrity_check; PRAGMA user_version; SELECT 'agent|'||id||'|'||state FROM agents ORDER BY id; SELECT 'message|'||id FROM messages ORDER BY id; SELECT 'cost|'||id FROM cost_events ORDER BY id; SELECT 'reservation|'||id FROM reservations ORDER BY id;"
+$verifySql="PRAGMA integrity_check; PRAGMA user_version; SELECT 'agent|'||id||'|'||state FROM agents ORDER BY id; SELECT 'session|'||id||'|'||state FROM sessions ORDER BY id; SELECT 'session_item|'||id FROM session_items ORDER BY id; SELECT 'model_request|'||id||'|'||state FROM model_requests ORDER BY id; SELECT 'cost|'||id||'|'||cash_basis||'|'||ifnull(cash_nanos,'NULL') FROM cost_events ORDER BY id; SELECT 'reservation|'||id||'|'||state FROM reservations ORDER BY id; SELECT 'notification|'||id||'|'||state FROM notifications ORDER BY id; SELECT 'event|'||id FROM events ORDER BY id;"
 function ReadSnapshot([string]$path){
  $si=[Diagnostics.ProcessStartInfo]::new($Sqlite);$si.ArgumentList.Add('-batch');$si.ArgumentList.Add($path);$si.ArgumentList.Add($verifySql)
  $si.RedirectStandardOutput=$true;$si.RedirectStandardError=$true;$si.UseShellExecute=$false
@@ -54,7 +54,7 @@ if($agents.Count -ne 7 -or -not (@($agents|Where-Object {$_ -ceq 'agent|agt_01a0
 $sha=(Get-FileHash -LiteralPath $Backup).Hash
 $fs=[IO.FileStream]::new($Backup,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 try{$fs.Flush($true)}finally{$fs.Dispose()}
-$record=[ordered]@{kind='fixture-sqlite-online-backup';backupSha=$sha;integrity='ok';schema=6;agentIds=7;tulkas='paused';messageCount=@($after|Where-Object {$_ -like 'message|*'}).Count;costCount=@($after|Where-Object {$_ -like 'cost|*'}).Count;reservationCount=@($after|Where-Object {$_ -like 'reservation|*'}).Count;sourceAndBackupKeysetEqual=$true;walBacked=[IO.File]::Exists($Database+'-wal')}
+$record=[ordered]@{kind='fixture-sqlite-online-backup';backupSha=$sha;integrity='ok';schema=6;agentIds=7;tulkas='paused';sessionCount=@($after|Where-Object {$_ -like 'session|*'}).Count;modelRequestCount=@($after|Where-Object {$_ -like 'model_request|*'}).Count;notificationCount=@($after|Where-Object {$_ -like 'notification|*'}).Count;eventCount=@($after|Where-Object {$_ -like 'event|*'}).Count;sessionItemCount=@($after|Where-Object {$_ -like 'session_item|*'}).Count;costCount=@($after|Where-Object {$_ -like 'cost|*'}).Count;reservationCount=@($after|Where-Object {$_ -like 'reservation|*'}).Count;sourceAndBackupKeysetEqual=$true;walBacked=[IO.File]::Exists($Database+'-wal')}
 $payload=($record|ConvertTo-Json -Compress)+"`n"
 $fs=[IO.FileStream]::new($Receipt,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
 try{$bytes=[Text.Encoding]::UTF8.GetBytes($payload);$fs.Write($bytes,0,$bytes.Length);$fs.Flush($true)}finally{$fs.Dispose()}

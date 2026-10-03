@@ -37,7 +37,7 @@
   "oldRoute": "subscription",
   "detachedOwner": "MOCK ONLY",
   "riskApproval": "interrupted-turn-and-admission-race-accepted",
-  "adapterHash": "D1E5ADD543CAAB818FEBE1BB1903E719B0850222EB3F43EB2FF596B6DF877874",
+  "adapterHash": "C072BD615E9606F2C1C672678AEF8FE35632439B5094DE482DF07A191FE70A2A",
   "supervisorSource": "254065c008e0ef61565971ebccfa11462c262e01",
   "planVersion": "one-outage-v2"
 }

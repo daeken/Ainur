@@ -9,8 +9,19 @@ if($scenario -eq 'crash-at-parent' -and $Operation -eq 'kill-old-parent-exact'){
 if($scenario -eq 'disable-failed' -and $Operation -eq 'disabled-status'){return [pscustomobject]@{label='gui/501/com.ainur.supervisor.5181';disabled=$false}}
 if($scenario -eq 'second-parent' -and $Operation -eq 'after-parent-facts'){return [pscustomobject]@{oldParentGone=$true;newParentAbsent=$false;child=@{pid=64728;started='C0'};listener=@{pid=64728;count=1};disabled=$true}}
 if($scenario -eq 'orphan-lease' -and $Operation -eq 'new-spawn-status'){return [pscustomobject]@{absent=$false;parentAbsent=$true;listenerAbsent=$true}}
-if($scenario -eq 'bad-core-sha' -and $Operation -eq 'route-attestation'){return [pscustomobject]@{route_class='subscription';process_id=$Options.pid;process_started_utc=$Options.started;release=$Options.release;generation=$Options.generation;core_sha256=('0'*64);provider_policy='openai_subscription_strict';independentProofSha=('a'*64)}}
-if($scenario -eq 'bad-route' -and $Operation -eq 'route-attestation'){return [pscustomobject]@{route_class='UNKNOWN';process_id=$Options.pid;process_started_utc=$Options.started;release=$Options.release;generation=$Options.generation;sourceHash='';provider_policy='openai_subscription_strict';independentProofSha=('a'*64)}}
+# A mock writes the seven-field sanitized response to the exact controller-owned proof path.
+# It cannot forge independent controller hash verification; adversarial cases mutate response or announced hash.
+if($Operation -eq 'route-attestation'){
+ $mockHash=if($Options.release -eq 'r20261002154643-01d6c043e2'){'1CD0AE8D1E2BEE1BCC9DA30C484B04284B73257712BC7C4F737EAF338AF364E3'}else{'787DD2BB636726472F91689957C283851386E2C0B50C85E45A0E643E75DA59A3'}
+ $route=[ordered]@{route_class=$(if($scenario -eq 'bad-route'){'UNKNOWN'}else{'subscription'});process_id=$Options.pid;process_started_utc=$Options.started;release=$Options.release;generation=$Options.generation;provider_policy='openai_subscription_strict';core_sha256=$(if($scenario -eq 'bad-core-sha'){'0'*64}else{$mockHash})}
+ $body=($route|ConvertTo-Json -Compress)+"`n"
+ if($scenario -eq 'forged-proof-hash'){$body=$body+' '}
+ $proof=[IO.FileStream]::new($Options.proofPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+ try{$bytes=[Text.Encoding]::UTF8.GetBytes($body);$proof.Write($bytes,0,$bytes.Length);$proof.Flush($true)}finally{$proof.Dispose()}
+ [IO.File]::SetUnixFileMode($Options.proofPath,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
+ $digest=if($scenario -eq 'forged-proof-hash'){'a'*64}else{(Get-FileHash -LiteralPath $Options.proofPath -Algorithm SHA256).Hash}
+ return [pscustomobject]@{proofPath=$Options.proofPath;independentProofSha=$digest}
+}
 if($scenario -eq 'final-pid-drift' -and $Operation -eq 'final-facts'){return [pscustomobject]@{pid=999;started='P999';release='r20261002154643-01d6c043e2';soleListener=$false;routeProofStillCurrent=$false}}
 if($scenario -eq 'backup-failed' -and $Operation -eq 'preflight-backup'){return [pscustomobject]@{backupSha='bad';backupLocation='';agentIds=@();schema=6}}
 if($scenario -eq 'child-survives' -and $Operation -eq 'after-child-facts'){return [pscustomobject]@{oldChildGone=$false;stillExact=$true;knownConsequential=$true;ownerApprovedExactKill=$false;oldParentGone=$true;listenerAbsent=$false;newParentAbsent=$true;disabled=$true}}
@@ -34,7 +45,6 @@ switch($Operation){
  else{$r='r20261002014730-766fa9f930';$h='787DD2BB636726472F91689957C283851386E2C0B50C85E45A0E643E75DA59A3';$childPid=700;$gen=9}
  return [pscustomobject]@{label='gui/501/com.ainur.supervisor.5181';parent=@{pid=699;family='dotnet-supervisor'};child=@{pid=$childPid;started="N$childPid";ppid=699;family='dotnet-server'};listener=@{pid=$childPid;count=1;endpoint='127.0.0.1:5181'};descendantCount=1;release=$r;schema=6;sourceHash=$h;generation=$gen}
  }
- 'route-attestation' {return [pscustomobject]@{route_class='subscription';process_id=$Options.pid;process_started_utc=$Options.started;release=$Options.release;generation=$Options.generation;core_sha256=$(if($Options.release -eq 'r20261002154643-01d6c043e2'){'1CD0AE8D1E2BEE1BCC9DA30C484B04284B73257712BC7C4F737EAF338AF364E3'}else{'787DD2BB636726472F91689957C283851386E2C0B50C85E45A0E643E75DA59A3'});provider_policy='openai_subscription_strict';independentProofSha=('a'*64)}}
  'upgrade-status' {return [pscustomobject]@{candidate='r20261002154643-01d6c043e2';previous='r20261002014730-766fa9f930';state=$(if($scenario -eq 'rolled-back'){'rolled_back'}else{'succeeded'})}}
  'final-facts' {return [pscustomobject]@{pid=$(if($scenario -eq 'rolled-back'){700}else{701});started=$(if($scenario -eq 'rolled-back'){'N700'}else{'N701'});release=$(if($scenario -eq 'rolled-back'){'r20261002014730-766fa9f930'}else{'r20261002154643-01d6c043e2'});soleListener=$true;routeProofStillCurrent=$true}}
  'snapshot-compare' {return [pscustomobject]@{agentIds=$ids;tulkasState='paused';schema=6;counts=$counts;integrity=$true;committedKeysPreserved=$true;committedBaselinePreserved=$true;unknownChargesPreserved=$true;noOverwrite=$true;backupUnchanged=$true}}

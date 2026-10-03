@@ -1,5 +1,6 @@
-PASS actual SQLite online WAL backup committed message+unknown cost+hold, 7 agents paused Tulkas, integrity/schema/hash; receipt=/tmp/ainur-disposable-wal-fixture-23d6a2516397464883e5f5a0e02ee057/backup-receipt.json
+PASS actual SQLite online WAL backup committed session_item+unknown cost+hold, 7 agents paused Tulkas, integrity/schema/hash; receipt=/tmp/ainur-disposable-wal-fixture-1af4ecae1a3b4ec380c368aaa554e5d9/backup-receipt.json
 PASS backup/receipt never overwrite on retry
+PASS stopped consistent SQLite backup after writer termination preserves ledger/session_items/seven IDs
 WAL exit=0
 PASS fake-native normal signalCount=1
 PASS fake-native foreign-listener signalCount=0
@@ -17,8 +18,9 @@ PASS second-parent exit=1 receipts=7 ops=10 retryBlocked=1
 PASS orphan-lease exit=1 receipts=10 ops=14 retryBlocked=1
 PASS bad-route exit=1 receipts=13 ops=19 retryBlocked=1
 PASS bad-core-sha exit=1 receipts=13 ops=19 retryBlocked=1
+PASS forged-proof-hash exit=1 receipts=13 ops=19 retryBlocked=1
 PASS backup-failed exit=1 receipts=3 ops=2 retryBlocked=1
 PASS child-survives exit=1 receipts=8 ops=12 retryBlocked=1
 PASS install-failed exit=1 receipts=11 ops=15 retryBlocked=1
-PASS: 12 offline adapter-invocation cases; NO native adapter supplied, NO live controls
+PASS: 13 offline adapter-invocation cases; NO native adapter supplied, NO live controls
 controller exit=0

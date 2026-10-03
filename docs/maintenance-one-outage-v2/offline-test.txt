@@ -7,8 +7,9 @@ PASS second-parent exit=1 receipts=7 ops=10 retryBlocked=1
 PASS orphan-lease exit=1 receipts=10 ops=14 retryBlocked=1
 PASS bad-route exit=1 receipts=13 ops=19 retryBlocked=1
 PASS bad-core-sha exit=1 receipts=13 ops=19 retryBlocked=1
+PASS forged-proof-hash exit=1 receipts=13 ops=19 retryBlocked=1
 PASS backup-failed exit=1 receipts=3 ops=2 retryBlocked=1
 PASS child-survives exit=1 receipts=8 ops=12 retryBlocked=1
 PASS install-failed exit=1 receipts=11 ops=15 retryBlocked=1
-PASS: 12 offline adapter-invocation cases; NO native adapter supplied, NO live controls
+PASS: 13 offline adapter-invocation cases; NO native adapter supplied, NO live controls
 exit=0

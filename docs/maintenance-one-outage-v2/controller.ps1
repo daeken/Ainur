@@ -23,6 +23,27 @@ function WriteReceipt([string]$step,[string]$outcome,[object]$data=$null){
  return $file
 }
 function CheckStop(){Require ((Get-Content -LiteralPath $script:stopFile -Raw).Trim() -ceq $script:expectedStop) 'stop-token changed; no further mutations'}
+function ReadRouteProof([object]$f,[object]$m){
+ $proofPath=Join-Path $ReceiptDirectory ('route-proof-{0:d3}.json' -f (++$script:proofIndex))
+ Require (-not [IO.File]::Exists($proofPath)) 'route proof already exists; no overwrite'
+ $ack=InvokeOp 'route-attestation' @{pid=$f.child.pid;started=$f.child.started;release=$f.release;generation=$f.generation;proofPath=$proofPath}
+ Require ($ack.independentProofSha -match '^[a-fA-F0-9]{64}$' -and $ack.proofPath -ceq $proofPath) 'route artifact hash/path missing'
+ $fi=[IO.FileInfo]::new($proofPath)
+ Require ($fi.Exists -and -not $fi.LinkTarget -and $fi.Length -gt 2 -and $fi.Length -le 4096) 'route artifact absent/link/oversize'
+ $mode=[IO.File]::GetUnixFileMode($proofPath)
+ Require (($mode -band ([IO.UnixFileMode]::GroupRead -bor [IO.UnixFileMode]::GroupWrite -bor [IO.UnixFileMode]::GroupExecute -bor [IO.UnixFileMode]::OtherRead -bor [IO.UnixFileMode]::OtherWrite -bor [IO.UnixFileMode]::OtherExecute)) -eq 0) 'route artifact mode not private'
+ Require ((Get-FileHash -LiteralPath $proofPath -Algorithm SHA256).Hash -ceq $ack.independentProofSha) 'route artifact bytes/SHA mismatch'
+ $raw=[IO.File]::ReadAllText($proofPath,[Text.Encoding]::UTF8)
+ $route=$raw|ConvertFrom-Json
+ $keys=@($route.PSObject.Properties.Name|Sort-Object)
+ $want=@('core_sha256','generation','process_id','process_started_utc','provider_policy','release','route_class')
+ Require (@(Compare-Object $keys $want).Count -eq 0) 'route artifact field whitelist mismatch'
+ Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and
+ [int]$route.process_id -eq [int]$f.child.pid -and $route.process_started_utc -ceq $f.child.started -and
+ $route.release -ceq $f.release -and [long]$route.generation -eq [long]$f.generation -and
+ $route.core_sha256 -ceq $f.sourceHash -and $f.sourceHash -ceq $m.expectedCoreHash) 'same-child authenticated route/Core not proven'
+ return [pscustomobject]@{route=$route;artifactSha=$ack.independentProofSha;artifactPath=$proofPath}
+}
 function AssertOld([object]$m,[object]$f){
  Require ($f.label -ceq $m.label -and [int]$f.parent.pid -eq [int]$m.parent.pid -and
  $f.parent.started -ceq $m.parent.started -and $f.parent.family -ceq 'dotnet-supervisor' -and
@@ -70,6 +91,7 @@ Require (-not [IO.Directory]::Exists($ReceiptDirectory)) 'receipt directory exis
 [IO.Directory]::CreateDirectory($ReceiptDirectory)|Out-Null
 [IO.File]::SetUnixFileMode($ReceiptDirectory,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
 $script:receiptIndex=0
+$script:proofIndex=0
 $script:stopFile=(Join-Path $ReceiptDirectory 'STOP')
 Require ($StopToken -match '^[a-f0-9]{64}$') 'stop token must be one-use 256-bit lowercase hex'
 $script:expectedStop=$StopToken
@@ -117,16 +139,14 @@ try{
  $null=InvokeOp 'enable-label';$null=InvokeOp 'bootstrap-once'
  $new=InvokeOp 'new-facts';AssertSupervisor $new $m $true;WriteReceipt 'new-ready' 'scoped' $new|Out-Null
  # No speculative self-service Bridge. Adapter may return only an independently reviewed same-process readback.
- $route=InvokeOp 'route-attestation' @{pid=$new.child.pid;started=$new.child.started;release=$m.expectedRelease;generation=$new.generation}
- Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$new.child.pid -and $route.process_started_utc -ceq $new.child.started -and $route.release -ceq $new.release -and [long]$route.generation -eq [long]$new.generation -and $route.core_sha256 -ceq $new.sourceHash -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'same-child initial route unproven'
+ $route=ReadRouteProof $new $m
  WriteReceipt 'initial-route' 'subscription' $route|Out-Null
  CheckStop
  $null=InvokeOp 'activate-candidate' @{release=$m.candidate};$upgrade=InvokeOp 'upgrade-status'
  Require ($upgrade.candidate -ceq $m.candidate -and $upgrade.previous -ceq $m.expectedRelease -and $upgrade.state -in @('succeeded','rolled_back')) 'upgrade outcome missing; intervention without blind retry'
  if($upgrade.state -ceq 'rolled_back'){
   $rolled=InvokeOp 'new-facts';AssertSupervisor $rolled $m $true
-  $route=InvokeOp 'route-attestation' @{pid=$rolled.child.pid;started=$rolled.child.started;release=$rolled.release;generation=$rolled.generation}
-  Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$rolled.child.pid -and $route.process_started_utc -ceq $rolled.child.started -and $route.release -ceq $rolled.release -and [long]$route.generation -eq [long]$rolled.generation -and $route.core_sha256 -ceq $rolled.sourceHash -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'rollback same-child route unproven'
+  $route=ReadRouteProof $rolled $m
   $afterDb=InvokeOp 'snapshot-compare';AssertSeven $afterDb $m
   Require ($afterDb.committedBaselinePreserved -eq $true -and $afterDb.unknownChargesPreserved -eq $true -and $afterDb.noOverwrite -eq $true -and $afterDb.backupUnchanged -eq $true) 'rollback DB/ledger/history/no-overwrite guard'
   $final=InvokeOp 'final-facts';Require ($final.pid -eq $rolled.child.pid -and $final.started -ceq $rolled.child.started -and $final.release -ceq $rolled.release -and $final.soleListener -eq $true -and $final.routeProofStillCurrent -eq $true) 'rollback postreceipt process drift'
@@ -135,8 +155,7 @@ try{
  }
  $candidate=InvokeOp 'new-facts';$candidateManifest=$m.PSObject.Copy();$candidateManifest.expectedRelease=$m.candidate;$candidateManifest.expectedCoreHash=$m.candidateCoreHash
  AssertSupervisor $candidate $candidateManifest $true
- $route=InvokeOp 'route-attestation' @{pid=$candidate.child.pid;started=$candidate.child.started;release=$candidate.release;generation=$candidate.generation}
- Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$candidate.child.pid -and $route.process_started_utc -ceq $candidate.child.started -and $route.release -ceq $candidate.release -and [long]$route.generation -eq [long]$candidate.generation -and $route.core_sha256 -ceq $candidate.sourceHash -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'candidate same-child route unproven'
+ $route=ReadRouteProof $candidate $candidateManifest
  $afterDb=InvokeOp 'snapshot-compare';AssertSeven $afterDb $m
  Require ($afterDb.committedBaselinePreserved -eq $true -and $afterDb.unknownChargesPreserved -eq $true -and $afterDb.noOverwrite -eq $true -and $afterDb.backupUnchanged -eq $true) 'ledger/history/cash/inbox/no-overwrite guard'
  $final=InvokeOp 'final-facts';Require ($final.pid -eq $candidate.child.pid -and $final.started -ceq $candidate.child.started -and $final.release -ceq $candidate.release -and $final.soleListener -eq $true -and $final.routeProofStillCurrent -eq $true) 'candidate postreceipt process drift'
