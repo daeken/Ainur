@@ -85,21 +85,12 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			return 3;
 		}
 		var state = releases.LoadState();
-		if(state.Active is null && Directory.Exists(releases.Root) && Directory.GetDirectories(releases.Root).Select(Path.GetFileName).Where(d => !state.Failed.Contains(d!)).OrderDescending().FirstOrDefault() is { } newest) {
-			Log($"No active release recorded; selecting newest built release {newest}");
-			state.Active = newest;
-			releases.SaveState(state);
-		}
-		if(state.Active is null) {
-			if(opts.Source is null) {
-				Log("No active release and no --source to build one from.");
-				return 2;
-			}
-			Log($"Building initial release from {opts.Source}");
-			var id = await releases.BuildAsync(opts.Source, Console.Out);
-			state.Active = id;
-			releases.SaveState(state);
-		}
+		// Never guess newest or build from source: neither has an independent strict
+		// receipt. Keep committed state unchanged on missing/unknown active release.
+		if(state.Active is null || !StrictReleaseGate.IsAcceptedTarget(state.Active) || opts.Source is not null)
+			RequireIntervention("HOLD_NO_SPAWN: absent/unknown active release or unapproved --source auto-build");
+		else if(!StrictReleaseGate.Verify(state.Active, releases.PathFor(state.Active), out _))
+			RequireIntervention("HOLD_NO_SPAWN: initial release payload is not exact accepted full-UI artifact");
 		while(!Cts.IsCancellationRequested) {
 			// Preserve the sole child after an unsafe stop/readiness/health/deadline outcome.
 			// No upgrade, rollback or replacement is permitted until independently recovered.
@@ -108,13 +99,21 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 				continue;
 			}
 			state = releases.LoadState();
+			if(state.Active is null || !StrictReleaseGate.IsAcceptedTarget(state.Active)) {
+				RequireIntervention("HOLD_NO_SPAWN: committed active release changed or unknown");
+				continue;
+			}
 			if(Runtime is { HasExited: true }) {
 				RequireIntervention($"Runtime {RunningRelease} exited with code {Runtime.ExitCode}; no automatic restart or rollback");
 				continue;
 			}
 			if(Runtime is null) {
 				if(Cts.IsCancellationRequested) break;
-				StartRuntime(state.Active!);
+				if(state.Active is null || !StrictReleaseGate.IsAcceptedTarget(state.Active)) {
+					RequireIntervention("HOLD_NO_SPAWN: active release changed or unknown");
+					continue;
+				}
+				if(!StartRuntime(state.Active)) continue;
 				if(!await WaitReadyAsync(opts.ReadyTimeout)) {
 					Log($"Runtime {state.Active} did not become ready; requesting graceful stop only");
 					var stopped = await StopRuntimeAsync(TimeSpan.FromSeconds(5));
@@ -192,10 +191,14 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		Log($"INTERVENTION REQUIRED: {reason}");
 	}
 
-	void StartRuntime(string releaseId) {
+	bool StartRuntime(string releaseId) {
 		if(InterventionRequired || Runtime is { HasExited: false })
 			throw new InvalidOperationException("Cannot start another runtime while a child is alive or intervention is required");
 		var dir = releases.PathFor(releaseId);
+		if(!StrictReleaseGate.Verify(releaseId, dir, out var reason)) {
+			RequireIntervention($"HOLD_NO_SPAWN: {reason}; strict full-payload release gate failed for {releaseId}");
+			return false;
+		}
 		var psi = new ProcessStartInfo("dotnet") { UseShellExecute = false, WorkingDirectory = dir };
 		psi.ArgumentList.Add(Path.Combine(dir, "Ainur.Server.dll"));
 		psi.ArgumentList.Add("--home"); psi.ArgumentList.Add(opts.Home);
@@ -209,6 +212,7 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		RunningRelease = releaseId;
 		RunningGeneration = null;
 		Log($"Started runtime {releaseId} (pid {Runtime.Id})");
+		return true;
 	}
 
 	// Readiness must belong to the child we actually started, not any old process serving :port.
@@ -291,6 +295,15 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 		var state = releases.LoadState();
 		var previous = state.Active!;
 		var attempt = req.AttemptId!;
+		// This release has only ONE independently accepted immutable payload; the
+		// current live image is not an attested distinct rollback. Preserve request
+		// records and current child; do not drain, stop, spawn or claim a rollback.
+		if(!StrictReleaseGate.IsAcceptedTarget(req.ReleaseId) || !StrictReleaseGate.Verify(req.ReleaseId, releases.PathFor(req.ReleaseId), out _) ||
+			!StrictReleaseGate.IsIndependentRollback(req.ReleaseId, previous)) {
+			RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "HOLD_NO_SPAWN: no independently attested candidate + distinct rollback");
+			RequireIntervention("HOLD_NO_SPAWN: upgrade requires independently accepted candidate and distinct rollback");
+			return;
+		}
 		if(state.Failed.Contains(req.ReleaseId)) {
 			Log($"Refusing to activate {req.ReleaseId}: it previously failed");
 			RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "release previously failed; activation suppressed");
@@ -325,7 +338,10 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "previous runtime did not exit; preserve drain and child; operator recovery required");
 			return;
 		}
-		StartRuntime(req.ReleaseId);
+		if(!StartRuntime(req.ReleaseId)) {
+			RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "HOLD_NO_SPAWN: candidate payload failed final pre-spawn gate");
+			return;
+		}
 		var ok = await WaitReadyAsync(opts.ReadyTimeout);
 		if(ok) {
 			RecordAttempt(attempt, req.ReleaseId, previous, "probation", "");
@@ -351,7 +367,11 @@ public sealed class Supervisor(SupervisorOptions opts, Releases releases) : IDis
 			}
 			state.Failed.Add(req.ReleaseId);
 			releases.SaveState(state);
-			StartRuntime(previous);
+			if(!StrictReleaseGate.IsIndependentRollback(req.ReleaseId, previous) || !StartRuntime(previous)) {
+				RequireIntervention("HOLD_NO_SPAWN: previous release lacks independent strict acceptance");
+				RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "rollback pre-spawn strict gate refused");
+				return;
+			}
 			if(!await WaitReadyAsync(opts.ReadyTimeout)) {
 				RequireIntervention("rollback runtime failed readiness; child preserved without replacement");
 				RecordAttempt(attempt, req.ReleaseId, previous, "aborted", "rollback not ready; intervention required");

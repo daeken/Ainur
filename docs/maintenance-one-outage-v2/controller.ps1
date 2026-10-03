@@ -86,10 +86,12 @@ if($TestMode){
  $m.adapterHash -ceq (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'mock-adapter.ps1')).Hash -and
  $m.liveApproved -eq $false) 'test mode restricted to frozen mock only'
 }else{
- # Root strict-only policy supersedes legacy 766/01d6 offline mock rollback pins.
- # NO native adapter can run until independently accepted BOTH running and automatic
- # rollback/recovery strict releases are re-pinned in reviewed controller source.
- Require $false 'strict candidate + automatic rollback/recovery target not pinned; legacy 766/e022 unsafe'
+ # Historical 766/01d6 adapter is MOCK-ONLY; no native path may use these
+ # stale pins. The separately pinned strict-18005e8-native-target.json accepts
+ # exactly ONE full-UI payload; there is NO distinct attested rollback image.
+ # Native remains disabled pending separately reviewed executable controller
+ # and immutable protected install/one-use detached outage gates.
+ Require $false 'strict candidate + distinct rollback not independently attested; HOLD_NO_SPAWN; legacy 766/e022 unsafe'
  Require ($m.liveApproved -eq $true -and $m.detachedOwner -and $m.independentGateSha -and $m.managerGoSha) 'not authorized for native adapter'
  Require ($m.approvedNativeAdapterHash -ceq $m.adapterHash) 'native adapter hash not independently approved'
 }

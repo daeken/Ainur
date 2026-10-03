@@ -1,0 +1,50 @@
+{
+  "planVersion": "one-full-ui-strict-native-offline-v1",
+  "enabled": false,
+  "nativeAdapterSupplied": false,
+  "mode": "HOLD_NO_SPAWN on unknown, changed, duplicate-source rollback, or missing independent gate",
+  "policy": "openai_subscription_strict",
+  "acceptedPayloadCount": 1,
+  "oldReleaseEligible": false,
+  "oldReleaseNotes": "Old e022/766 and prior incomplete 461-copy rollback are NOT independently accepted full-UI artifacts and NEVER eligible to spawn.",
+  "release": {
+    "releaseId": "r20261003-ulmo-fullui-18005e8-4d6baf032671",
+    "sourceCommit": "18005e8c61f61c11c4c931d3d5cd87438c231a24",
+    "sourceTree": "e6fd3e2755411282974db3103dcf0564574a594b",
+    "stagingPath": "/tmp/ainur-ulmo-full-ui-release-18005e8-verified",
+    "releaseJsonSha256": "55A91E8FE46D69BE72AA0CDAD8A72F161BB1DE8211CFB43B52B9907584368385",
+    "coreSha256": "7A440EE4FC87C68ADD1C5BC472AB2C2E7E18260E8FAFC88C89D24F37B554965F",
+    "serverSha256": "214D53A1CE0F79639498E8F70C8059DB8D6B4AFDC1ADF0729EBD473659DC865B",
+    "exeSha256": "1E8391DC3F39C17E89FC3E2D41745A2AF7237A14E3EDCB5C77A4B610C5B72CB9",
+    "filesManifestSha256": "482AC381952C9897CC4B6C1DE30863C323D28DD25C1E3C28A49C4249577AE189",
+    "filesManifestCount": 471,
+    "directoryCount": 113,
+    "sourceEvidenceRef": "refs/heads/ainur/ulmo/full-ui-frozen-evidence",
+    "sourceEvidenceCommit": "a041b05b705f74127089444d7422d1bf62d6cccd",
+    "authenticatedStagedReceiptPath": "/tmp/ainur-rr-fixed-evidence-b4ec3476251d4d8888c795e20b48a4a7.json",
+    "authenticatedStagedReceiptSha256": "8F39463A5132D64527E43E60A7B312EC5B7B3B3946FFF6B46C83ADDEADAA0A75",
+    "receiptDisposition": "EXIT_VERIFIED; PID 94245 absent; port 53009 refused",
+    "httpSmoke": "GET /, SHA-matched JS/CSS, GET /api/v1/health ready/schema6/generation; provider-free"
+  },
+  "rollback": {
+    "distinctAcceptedReleaseCount": 0,
+    "automaticRollbackPermitted": false,
+    "sameImmutableSourceMayBeVerifiedButCannotBePresentedAsDistinctRollback": true,
+    "failureAction": "PROTECTED_HOLD_NO_SPAWN; preserve committed release/ledger/backup; require independent owner-directed recovery"
+  },
+  "runtimePath": {
+    "label": "gui/501/com.ainur.supervisor.5181",
+    "home": "/Users/daeken/projects/Ainur/src/Ainur.Server/.ainur/dev",
+    "port": 5181,
+    "eligibleInstalledReleasePath": "<same home>/supervisor/releases/r20261003-ulmo-fullui-18005e8-4d6baf032671",
+    "installedReleaseState": "NOT_VERIFIED; no copy/install/launchd action authorized or done",
+    "preSpawn": "Supervisor.StrictReleaseGate.Verify on every StartRuntime; also gate initial active, requested upgrade, and rollback before drain",
+    "spawnLease": "Existing one-use supervisor lease independently required; do not reset from a failed attempt"
+  },
+  "outageController": {
+    "existingV2Controller": "mock-only; legacy target pins remain for offline historical regression; non-test branch unconditionally refuses native adapter",
+    "nativeAdapterStatus": "NOT_SUPPLIED, NOT_AUTHORIZED",
+    "proposedNativeOutcome": "NO_GO until operator-owned process/DB/control baseline, detached adapter/code hash, immutable installation attestations, route proof, backup + recovery, independent Yavanna+Namo gate, manager/root explicit execution GO",
+    "noLiveActions": true
+  }
+}
