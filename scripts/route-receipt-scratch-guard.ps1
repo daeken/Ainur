@@ -23,29 +23,63 @@ $receiptDeadline = $null
 Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 public sealed class AinurRestrictedStartupCapture {
     private readonly object gate = new object();
     private int lines;
     private int bytes;
-    private string diagnostic = "NONE";
+    private string diagnostic = "NONE", exceptionKind = "UNCLASSIFIED", component = "UNKNOWN", site = "UNKNOWN";
+    private bool exceptionIsInner;
+    // Only fixed vocabulary crosses the process boundary. Never persist raw lines, paths, messages or arguments.
     public string Diagnostic { get { lock (gate) return diagnostic; } }
+    public string ExceptionKind { get { lock (gate) return exceptionKind; } }
+    public string Component { get { lock (gate) return component; } }
+    public string Site { get { lock (gate) return site; } }
+    private static readonly Regex Exception = new Regex(
+        @"^\s*(?:(?:Unhandled exception\. |---> )?(?:System\.(?:IO\.|Net\.Sockets\.)?|Microsoft\.Data\.Sqlite\.|Microsoft\.Extensions\.DependencyInjection\.))(?<type>IOException|FileNotFoundException|DirectoryNotFoundException|UnauthorizedAccessException|InvalidOperationException|ArgumentException|ArgumentNullException|ArgumentOutOfRangeException|NullReferenceException|TypeInitializationException|TypeLoadException|DllNotFoundException|SqliteException|SocketException|FormatException|NotSupportedException)(?:\s|:|$)", RegexOptions.CultureInvariant);
+    private static readonly Regex Frame = new Regex(@"^\s+at (?<ns>Ainur\.(?:Core|Server)|Microsoft\.Data\.Sqlite|Microsoft\.AspNetCore|System\.Net\.Sockets)(?:\.|\b)", RegexOptions.CultureInvariant);
     public void OnLine(object sender, DataReceivedEventArgs args) {
         var data = args.Data;
         if (data == null) return;
         lock (gate) {
             if (++lines > 1000 || (bytes += data.Length) > 65536 || data.Length > 4096) return;
             var text = data.ToLowerInvariant();
-            if (diagnostic != "NONE") return;
             if (text.Contains("address already in use")) diagnostic = "PORT_ALREADY_BOUND";
-            else if (text.Contains("failed to bind")) diagnostic = "BIND_FAILED";
-            else if (text.Contains("permission denied")) diagnostic = "PERMISSION_DENIED";
-            else if (text.Contains("unhandled exception")) diagnostic = "UNHANDLED_EXCEPTION";
+            else if (text.Contains("failed to bind") && diagnostic == "NONE") diagnostic = "BIND_FAILED";
+            else if (text.Contains("permission denied") && diagnostic == "NONE") diagnostic = "PERMISSION_DENIED";
+            else if (text.StartsWith("unhandled exception", StringComparison.Ordinal) && diagnostic == "NONE") diagnostic = "UNHANDLED_EXCEPTION";
+            else if (text.StartsWith("you must install or update .net", StringComparison.Ordinal) && diagnostic == "NONE") diagnostic = "DOTNET_FRAMEWORK_MISSING";
+            var isInner = data.TrimStart().StartsWith("---> ", StringComparison.Ordinal);
+            if (exceptionKind == "UNCLASSIFIED" || (isInner && !exceptionIsInner)) {
+                var match = Exception.Match(data);
+                if (match.Success) {
+                    exceptionKind = match.Groups["type"].Value.ToUpperInvariant();
+                    exceptionIsInner = isInner;
+                }
+            }
+            if (component == "UNKNOWN") {
+                var match = Frame.Match(data);
+                if (match.Success) {
+                    var ns = match.Groups["ns"].Value;
+                    component = ns == "Microsoft.Data.Sqlite" ? "SQLITE" : ns == "Microsoft.AspNetCore" ? "ASPNET_HOST" : ns == "System.Net.Sockets" ? "SOCKET" : ns == "Ainur.Server" ? "AINUR_SERVER" : "AINUR_CORE";
+                }
+            }
+            // Independently fixed source-frame vocabulary, never a path, method name or user data.
+            if (site == "UNKNOWN" && Frame.IsMatch(data)) {
+                if (data.StartsWith("   at Microsoft.Data.Sqlite.SqliteConnection.Open(", StringComparison.Ordinal)) site = "SQLITE_OPEN";
+                else if (data.StartsWith("   at System.Net.Sockets.Socket.Bind(", StringComparison.Ordinal)) site = "SOCKET_BIND";
+                else if (data.StartsWith("   at Ainur.Core.Persistence.Db.", StringComparison.Ordinal)) site = "DB_INIT";
+                else if (data.StartsWith("   at Ainur.Core.Runtime.AinurRuntime.", StringComparison.Ordinal)) site = "RUNTIME_INIT";
+                else if (data.StartsWith("   at Ainur.Server.ServerOptions.FromArgs(", StringComparison.Ordinal)) site = "SERVER_OPTIONS";
+                else if (data.StartsWith("   at Ainur.Server.SchedulerLock.TryAcquire(", StringComparison.Ordinal)) site = "SCHEDULER_LOCK";
+                else if (data.StartsWith("   at Microsoft.AspNetCore.Hosting.WebHost.Start(", StringComparison.Ordinal)) site = "HOST_START";
+            }
         }
     }
 }
 '@ -ErrorAction Stop
 $capture = [AinurRestrictedStartupCapture]::new()
-$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; scratch_root = $null; error_code = $null }
+$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; startup_exception_kind = 'UNCLASSIFIED'; startup_component = 'UNKNOWN'; startup_site = 'UNKNOWN'; scratch_root = $null; error_code = $null }
 function Remaining-ReceiptTime([Diagnostics.Stopwatch]$Clock) {
  $remainingMs = 12000 - [int]$Clock.ElapsedMilliseconds
  if($remainingMs -le 0) { throw 'RECEIPT_TIMEOUT' }
@@ -53,7 +87,8 @@ function Remaining-ReceiptTime([Diagnostics.Stopwatch]$Clock) {
 }
 function Stop-ExactChild([Diagnostics.Process]$Child) {
  try {
-  if($Child.HasExited -or $Child.WaitForExit(750)) { return $true }
+  # WaitForExit drains asynchronous redirected-output callbacks, even when already exited.
+  if($Child.WaitForExit(750)) { return $true }
   $Child.Kill($false) # exact child only; never process tree
   return $Child.WaitForExit(2500)
  } catch { return $false } # UNKNOWN_HOLD: no unproven exited claim
@@ -281,6 +316,9 @@ try {
 		$record.child_disposition = if($record.stopped) { 'EXIT_VERIFIED' } else { 'UNKNOWN_HOLD' }
 		if($record.stopped) { try { $record.exit_code = $process.ExitCode } catch {} }
 		$record.startup_diagnostic = $capture.Diagnostic
+		$record.startup_exception_kind = $capture.ExceptionKind
+		$record.startup_component = $capture.Component
+		$record.startup_site = $capture.Site
 		if(!$record.stopped) { $record.stage = 'unknown_hold'; $record.error_code = 'CHILD_DISPOSITION_UNKNOWN_HOLD' }
 		$process.Dispose()
 	}

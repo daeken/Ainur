@@ -26,6 +26,25 @@ with open(key_path,'r') as f: key=f.read().strip()
 from datetime import datetime, timezone
 started=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
 if mode=='cold': time.sleep(4.5)
+failures={
+ 'sqlite': ('Unhandled exception. Microsoft.Data.Sqlite.SqliteException: database /SECRET_DO_NOT_STORE token=KEY_DO_NOT_STORE',
+            '   at Microsoft.Data.Sqlite.SqliteConnection.Open() in /PRIVATE_PATH_SHOULD_NOT_STORE'),
+ 'bind': ('Unhandled exception. System.Net.Sockets.SocketException: bind failed token=KEY_DO_NOT_STORE',
+          '   at System.Net.Sockets.Socket.Bind() in /PRIVATE_PATH_SHOULD_NOT_STORE'),
+ 'di': ('Unhandled exception. System.InvalidOperationException: Cannot resolve secret=KEY_DO_NOT_STORE',
+        '   at Microsoft.AspNetCore.Hosting.WebHost.Start() in /PRIVATE_PATH_SHOULD_NOT_STORE'),
+ 'configuration': ('Unhandled exception. System.IO.FileNotFoundException: /SECRET_DO_NOT_STORE token=KEY_DO_NOT_STORE',
+                   '   at Ainur.Server.ServerOptions.FromArgs() in /PRIVATE_PATH_SHOULD_NOT_STORE'),
+ 'inner': ('Unhandled exception. System.TypeInitializationException: /SECRET_DO_NOT_STORE',
+           ' ---> Microsoft.Data.Sqlite.SqliteException: KEY_DO_NOT_STORE',
+           '   at Ainur.Core.Persistence.Db.Open() in /PRIVATE_PATH_SHOULD_NOT_STORE'),
+ 'framework': ('You must install or update .NET to run this application. /SECRET_DO_NOT_STORE KEY_DO_NOT_STORE',),
+ 'untrusted': ('Unhandled exception. Evil.SecretException: SECRET_DO_NOT_STORE KEY_DO_NOT_STORE',
+               '   at Evil.GetSecrets() in /PRIVATE_PATH_SHOULD_NOT_STORE')
+}
+if mode in failures:
+ for line in failures[mode]: print(line,file=sys.stderr,flush=True)
+ os._exit(23)
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
@@ -52,7 +71,14 @@ $cases = @(
  @{ name='positive-receipt'; mode='valid'; expected='finished'; valid=$true },
  @{ name='cold-healthy'; mode='cold'; expected='finished'; valid=$true },
  @{ name='slow-auth-cumulative'; mode='auth-slow'; expected='RECEIPT_TIMEOUT'; valid=$true },
- @{ name='sanitized-startup-failure'; mode='broken'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true },
+ @{ name='sanitized-startup-failure'; mode='broken'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='UNCLASSIFIED'; component='UNKNOWN'; site='UNKNOWN' },
+ @{ name='sqlite-component'; mode='sqlite'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='SQLITEEXCEPTION'; component='SQLITE'; site='SQLITE_OPEN' },
+ @{ name='bind-component'; mode='bind'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='SOCKETEXCEPTION'; component='SOCKET'; site='SOCKET_BIND' },
+ @{ name='di-component'; mode='di'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='INVALIDOPERATIONEXCEPTION'; component='ASPNET_HOST'; site='HOST_START' },
+ @{ name='config-component'; mode='configuration'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='FILENOTFOUNDEXCEPTION'; component='AINUR_SERVER'; site='SERVER_OPTIONS' },
+ @{ name='inner-exception'; mode='inner'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='SQLITEEXCEPTION'; component='AINUR_CORE'; site='DB_INIT' },
+ @{ name='missing-framework'; mode='framework'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='DOTNET_FRAMEWORK_MISSING'; kind='UNCLASSIFIED'; component='UNKNOWN'; site='UNKNOWN' },
+ @{ name='untrusted-message'; mode='untrusted'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='UNCLASSIFIED'; component='UNKNOWN'; site='UNKNOWN' },
  @{ name='bad-route'; mode='bad-route'; expected='RECEIPT_ROUTE_MISMATCH'; valid=$true },
  @{ name='hung-http'; mode='slow'; expected='RECEIPT_TIMEOUT'; valid=$true },
  @{ name='handoff-hung-receipt'; mode='handoff'; expected='RECEIPT_TIMEOUT'; valid=$true },
@@ -75,7 +101,8 @@ foreach($case in $cases) {
  $record=Get-Content $evidence -Raw | ConvertFrom-Json
  if($record.stage -cne $case.expected -and $record.error_code -cne $case.expected) {throw "CASE_FAIL $($case.name) observed=$($record.error_code) stage=$($record.stage)"}
  if($timer.Elapsed.TotalSeconds -gt 17){throw "UNBOUNDED including bounded stop $($case.name) seconds=$($timer.Elapsed.TotalSeconds)"}
- if($case.name -eq 'sanitized-startup-failure' -and ($record.startup_diagnostic -cne 'UNHANDLED_EXCEPTION' -or ((Get-Content $evidence -Raw) -match 'SECRET_DO_NOT_STORE|KEY_DO_NOT_STORE'))){throw 'STARTUP_SIGNAL_MISSING_OR_SECRET_LEAK'}
+ if($case.ContainsKey('diagnostic') -and ($record.startup_diagnostic -cne $case.diagnostic -or $record.startup_exception_kind -cne $case.kind -or $record.startup_component -cne $case.component -or $record.startup_site -cne $case.site)){throw "DIAGNOSTIC_MISMATCH $($case.name) code=$($record.startup_diagnostic) type=$($record.startup_exception_kind) component=$($record.startup_component) site=$($record.startup_site)"}
+ if((Get-Content $evidence -Raw) -match 'SECRET_DO_NOT_STORE|KEY_DO_NOT_STORE|PRIVATE_PATH_SHOULD_NOT_STORE|Evil|Cannot resolve|database'){throw "SECRET_OR_UNTRUSTED_OUTPUT_LEAK $($case.name)"}
  if($case.valid -and ($record.child_disposition -ne 'EXIT_VERIFIED' -or $record.stopped -ne $true)){throw "UNKNOWN_CHILD_DISPOSITION $($case.name) stage=$($record.stage) error=$($record.error_code) disposition=$($record.child_disposition) stopped=$($record.stopped)"}
  if(!$case.valid -and $record.child_disposition -ne 'NOT_STARTED'){throw "PRELAUNCH_STARTED_CHILD $($case.name)"}
  if($case.valid -and (!$record.stopped -or !$record.process_id -or !$record.process_started_utc)){throw "CHILD_UNIDENTIFIED_OR_LIVE $($case.name)"}
@@ -83,4 +110,4 @@ foreach($case in $cases) {
  if($case.name -eq 'positive-receipt' -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden')){throw 'POSITIVE_RECEIPT_MISSING'}
  "PASS $($case.name) $($record.stage) $($record.error_code) seconds=$([Math]::Round($timer.Elapsed.TotalSeconds,2))"
 }
-'PASSED=8'
+'PASSED=15'
