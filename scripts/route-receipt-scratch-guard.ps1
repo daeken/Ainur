@@ -79,7 +79,7 @@ public sealed class AinurRestrictedStartupCapture {
 }
 '@ -ErrorAction Stop
 $capture = [AinurRestrictedStartupCapture]::new()
-$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; startup_exception_kind = 'UNCLASSIFIED'; startup_component = 'UNKNOWN'; startup_site = 'UNKNOWN'; scratch_root = $null; error_code = $null }
+$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; startup_exception_kind = 'UNCLASSIFIED'; startup_component = 'UNKNOWN'; startup_site = 'UNKNOWN'; start_delta_seconds = $null; scratch_root = $null; error_code = $null }
 function Remaining-ReceiptTime([Diagnostics.Stopwatch]$Clock) {
  $remainingMs = 12000 - [int]$Clock.ElapsedMilliseconds
  if($remainingMs -le 0) { throw 'RECEIPT_TIMEOUT' }
@@ -295,6 +295,7 @@ try {
 			if([int]$receipt.process_id -ne $process.Id -or [int]$receipt.generation -ne [int]$version.generation) { throw 'RECEIPT_IDENTITY_MISMATCH' }
 			$reportedStart = [DateTimeOffset]::Parse([string]$receipt.process_started_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal)
 			$startDelta = [Math]::Abs(($reportedStart.ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds)
+			$record.start_delta_seconds = [Math]::Min(999999,[Math]::Round($startDelta,3))
 			if($startDelta -gt 2) { throw 'RECEIPT_START_MISMATCH' }
 			$record.route_class = 'subscription'
 			$record.provider_policy = 'openai_subscription_strict'
