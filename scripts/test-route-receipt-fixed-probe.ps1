@@ -71,4 +71,4 @@ foreach($case in $cases) {
  if($case.name -eq 'positive-receipt' -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden')){throw 'POSITIVE_RECEIPT_MISSING'}
  "PASS $($case.name) $($record.stage) $($record.error_code) seconds=$([Math]::Round($timer.Elapsed.TotalSeconds,2))"
 }
-'PASSED=4'
+'PASSED=5'
