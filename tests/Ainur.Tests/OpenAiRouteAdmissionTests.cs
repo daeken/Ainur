@@ -64,14 +64,84 @@ public class OpenAiRouteAdmissionTests {
 	}
 
 	[Theory]
-	[InlineData("auto")] [InlineData("api")] [InlineData("subscription")]
-	public async Task ApiBilledRowAlwaysUsesApiTransportAndNeverSubscriptionCredential(string route) {
+	[InlineData("auto")] [InlineData("api")]
+	public async Task ApiBilledRowUsesApiTransportOnlyUnderNonstrictRoute(string route) {
 		var handler = new ScriptedHandler(); handler.Add(_ => true, _ => Success());
 		var subscriptionReads = 0;
 		var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => "test-key", codexAuthPath: () => { subscriptionReads++; return null; }, routeOverride: route);
 		await provider.CompleteAsync(Request("api"), null, default);
 		Assert.Equal(OpenAiResponsesProvider.ApiEndpoint, Assert.Single(handler.Seen).Uri);
 		Assert.Equal(0, subscriptionReads);
+	}
+
+	[Theory]
+	[InlineData("subscription")] [InlineData("unrecognized")]
+	public async Task StrictOrUnknownRouteRejectsDirectApiBeforeCredentialOrHttp(string route) {
+		var handler = new ScriptedHandler(); handler.Add(_ => true, _ => Success());
+		var reads = 0;
+		var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => { reads++; return "test-key"; }, codexAuthPath: () => { reads++; return null; }, routeOverride: route);
+		await Assert.ThrowsAsync<ProviderException>(() => provider.CompleteAsync(Request("api"), null, default));
+		Assert.Equal(0, reads); Assert.Empty(handler.Seen);
+	}
+
+	[Fact]
+	public async Task ChangedRouteBetweenGatewaySelectionAndProviderDispatchFailsClosed() {
+		using var home = new TempHome(); var path = Auth(home);
+		var route = "auto";
+		var handler = new ScriptedHandler(); handler.Add(_ => true, _ => Success());
+		var keyReads = 0;
+		var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => { keyReads++; return "test-key"; }, codexAuthPath: () => { route = "subscription"; return path; }, routeProvider: () => route);
+		using var rt = home.Runtime(provider, start: false);
+		var project = rt.CreateProject("offline", "", home.Workspace, managerModelId: "gpt-6-astra");
+		// Route mutates while obtaining credentials, after the first dispatch guard.
+		// The gateway must still refuse an API fallback before quote/admission.
+		await Assert.ThrowsAnyAsync<ProviderException>(() => rt.Gateway.CallAsync(new ModelCall {
+			ProjectId = project.Id, Model = rt.Store.GetModel("gpt-6-astra")!, Messages = [ChatMessage.User("offline")], Purpose = "test", Category = "direct",
+		}, default));
+		Assert.Equal(0, keyReads);
+		Assert.Empty(handler.Seen);
+		Assert.Equal("gpt-6-astra", Assert.Single(rt.Store.ModelRequestsInState("failed")).ModelId);
+		Assert.DoesNotContain(rt.Store.ModelRequestsInState("failed"), request => request.ModelId == "gpt-6-astra-api");
+	}
+
+	[Fact]
+	public async Task StrictRouteOmitsEligibleApiFallbackBeforeQuoteOrJournal() {
+		using var home = new TempHome(); var path = Auth(home);
+		var handler = new ScriptedHandler();
+		handler.Add(m => m.RequestUri!.ToString() == OpenAiResponsesProvider.SubscriptionEndpoint,
+			_ => ScriptedHandler.Json("{\"error\":\"original subscription quota\"}", HttpStatusCode.TooManyRequests));
+		handler.Add(_ => true, _ => Success());
+		var keyReads = 0;
+		var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => { keyReads++; return "test-key"; }, codexAuthPath: () => path, routeOverride: "subscription");
+		using var rt = home.Runtime(provider, start: false);
+		var project = rt.CreateProject("offline", "", home.Workspace, managerModelId: "gpt-6-astra", noEffectiveLimit: true, cashCeilingDollars: 50);
+		await Assert.ThrowsAsync<ProviderException>(() => rt.Gateway.CallAsync(new ModelCall {
+			ProjectId = project.Id, Model = rt.Store.GetModel("gpt-6-astra")!, Messages = [ChatMessage.User("offline")], Purpose = "test", Category = "direct", ReasoningEffort = "max",
+		}, default));
+		Assert.Equal(OpenAiResponsesProvider.SubscriptionEndpoint, Assert.Single(handler.Seen).Uri);
+		Assert.Equal(0, keyReads);
+		var failed = Assert.Single(rt.Store.ModelRequestsInState("failed"));
+		Assert.Equal("gpt-6-astra", failed.ModelId);
+		Assert.Equal("subscription", JsonNode.Parse(failed.Quote)!["billing"]!.GetValue<string>());
+		Assert.Empty(rt.Store.ModelRequestsInState("succeeded"));
+		Assert.Empty(rt.Store.ModelRequestsInState("dispatched"));
+		Assert.DoesNotContain(rt.Store.Events(project.Id), e => e.Kind == "model.failover");
+		Assert.Equal(0, rt.Ledger.Summary(project.Id).ReservedCashUnknownCount);
+	}
+
+	[Fact]
+	public async Task GatewayRejectsDirectStrictApiBeforeQuoteOrCredential() {
+		using var home = new TempHome();
+		var handler = new ScriptedHandler(); handler.Add(_ => true, _ => Success());
+		var reads = 0;
+		var provider = new OpenAiResponsesProvider(new HttpClient(handler), apiKey: () => { reads++; return "test-key"; }, codexAuthPath: () => null, routeOverride: "subscription");
+		using var rt = home.Runtime(provider, start: false);
+		var project = rt.CreateProject("offline", "", home.Workspace, managerModelId: "gpt-6-astra");
+		await Assert.ThrowsAsync<ProviderException>(() => rt.Gateway.CallAsync(new ModelCall {
+			ProjectId = project.Id, Model = rt.Store.GetModel("gpt-6-astra-api")!, Messages = [ChatMessage.User("offline")], Purpose = "test", Category = "direct",
+		}, default));
+		Assert.Equal(0, reads); Assert.Empty(handler.Seen);
+		Assert.Empty(rt.Store.ModelRequestsInState("dispatched")); Assert.Empty(rt.Store.ModelRequestsInState("failed"));
 	}
 
 	[Fact]
