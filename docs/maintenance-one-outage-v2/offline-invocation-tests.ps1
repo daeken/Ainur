@@ -8,7 +8,7 @@ $hostPath=Join-Path $root 'src/Ainur.Server/.ainur/dev/supervisor/bootstrap/host
 if(-not (Test-Path $hostPath)){$hostPath='/Users/daeken/projects/Ainur/src/Ainur.Server/.ainur/dev/supervisor/bootstrap/host/HandoffHost.dll'}
 $mock=Get-Content $manifest -Raw|ConvertFrom-Json
 if((Get-FileHash $adapter).Hash -cne $mock.adapterHash){throw 'mock adapter drift'}
-$cases=@('normal','rolled-back','final-pid-drift','crash-at-parent','disable-failed','second-parent','orphan-lease','bad-route','backup-failed','child-survives','install-failed')
+$cases=@('normal','rolled-back','final-pid-drift','crash-at-parent','disable-failed','second-parent','orphan-lease','bad-route','bad-core-sha','backup-failed','child-survives','install-failed')
 $log=@()
 foreach($case in $cases){
  $dir=Join-Path ([IO.Path]::GetTempPath()) ('ainur-maint-v2-offline-'+[guid]::NewGuid().ToString('N'))

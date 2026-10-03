@@ -118,7 +118,7 @@ try{
  $new=InvokeOp 'new-facts';AssertSupervisor $new $m $true;WriteReceipt 'new-ready' 'scoped' $new|Out-Null
  # No speculative self-service Bridge. Adapter may return only an independently reviewed same-process readback.
  $route=InvokeOp 'route-attestation' @{pid=$new.child.pid;started=$new.child.started;release=$m.expectedRelease;generation=$new.generation}
- Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$new.child.pid -and $route.process_started_utc -ceq $new.child.started -and $route.release -ceq $new.release -and [long]$route.generation -eq [long]$new.generation -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'same-child initial route unproven'
+ Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$new.child.pid -and $route.process_started_utc -ceq $new.child.started -and $route.release -ceq $new.release -and [long]$route.generation -eq [long]$new.generation -and $route.core_sha256 -ceq $new.sourceHash -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'same-child initial route unproven'
  WriteReceipt 'initial-route' 'subscription' $route|Out-Null
  CheckStop
  $null=InvokeOp 'activate-candidate' @{release=$m.candidate};$upgrade=InvokeOp 'upgrade-status'
@@ -126,7 +126,7 @@ try{
  if($upgrade.state -ceq 'rolled_back'){
   $rolled=InvokeOp 'new-facts';AssertSupervisor $rolled $m $true
   $route=InvokeOp 'route-attestation' @{pid=$rolled.child.pid;started=$rolled.child.started;release=$rolled.release;generation=$rolled.generation}
-  Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$rolled.child.pid -and $route.process_started_utc -ceq $rolled.child.started -and $route.release -ceq $rolled.release -and [long]$route.generation -eq [long]$rolled.generation -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'rollback same-child route unproven'
+  Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$rolled.child.pid -and $route.process_started_utc -ceq $rolled.child.started -and $route.release -ceq $rolled.release -and [long]$route.generation -eq [long]$rolled.generation -and $route.core_sha256 -ceq $rolled.sourceHash -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'rollback same-child route unproven'
   $afterDb=InvokeOp 'snapshot-compare';AssertSeven $afterDb $m
   Require ($afterDb.committedBaselinePreserved -eq $true -and $afterDb.unknownChargesPreserved -eq $true -and $afterDb.noOverwrite -eq $true -and $afterDb.backupUnchanged -eq $true) 'rollback DB/ledger/history/no-overwrite guard'
   $final=InvokeOp 'final-facts';Require ($final.pid -eq $rolled.child.pid -and $final.started -ceq $rolled.child.started -and $final.release -ceq $rolled.release -and $final.soleListener -eq $true -and $final.routeProofStillCurrent -eq $true) 'rollback postreceipt process drift'
@@ -136,7 +136,7 @@ try{
  $candidate=InvokeOp 'new-facts';$candidateManifest=$m.PSObject.Copy();$candidateManifest.expectedRelease=$m.candidate;$candidateManifest.expectedCoreHash=$m.candidateCoreHash
  AssertSupervisor $candidate $candidateManifest $true
  $route=InvokeOp 'route-attestation' @{pid=$candidate.child.pid;started=$candidate.child.started;release=$candidate.release;generation=$candidate.generation}
- Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$candidate.child.pid -and $route.process_started_utc -ceq $candidate.child.started -and $route.release -ceq $candidate.release -and [long]$route.generation -eq [long]$candidate.generation -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'candidate same-child route unproven'
+ Require ($route.route_class -ceq 'subscription' -and $route.provider_policy -ceq 'openai_subscription_strict' -and [int]$route.process_id -eq [int]$candidate.child.pid -and $route.process_started_utc -ceq $candidate.child.started -and $route.release -ceq $candidate.release -and [long]$route.generation -eq [long]$candidate.generation -and $route.core_sha256 -ceq $candidate.sourceHash -and $route.independentProofSha -match '^[a-fA-F0-9]{64}$') 'candidate same-child route unproven'
  $afterDb=InvokeOp 'snapshot-compare';AssertSeven $afterDb $m
  Require ($afterDb.committedBaselinePreserved -eq $true -and $afterDb.unknownChargesPreserved -eq $true -and $afterDb.noOverwrite -eq $true -and $afterDb.backupUnchanged -eq $true) 'ledger/history/cash/inbox/no-overwrite guard'
  $final=InvokeOp 'final-facts';Require ($final.pid -eq $candidate.child.pid -and $final.started -ceq $candidate.child.started -and $final.release -ceq $candidate.release -and $final.soleListener -eq $true -and $final.routeProofStillCurrent -eq $true) 'candidate postreceipt process drift'
