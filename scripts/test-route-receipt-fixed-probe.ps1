@@ -18,17 +18,22 @@ import hashlib, json, os, sys, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 assert len(sys.argv)==7 and sys.argv[1]=='--home' and sys.argv[3]=='--port' and sys.argv[5]=='--release'
 assert os.environ['AINUR_VALIDATION']=='1' and os.environ['AINUR_OPENAI_ROUTE']=='subscription'
-home, port, release, mode = sys.argv[2], int(sys.argv[4]), sys.argv[6], 'CASE_MODE'
-assert home.startswith('/tmp/ainur-rr-guard-') and home.endswith('/home')
-key_path=os.path.join(home,'supervisor','receipt-secrets','route-receipt.key')
+scratch_home_path, port, release, mode = sys.argv[2], int(sys.argv[4]), sys.argv[6], 'CASE_MODE'
+assert scratch_home_path.startswith('/tmp/ainur-rr-guard-') and scratch_home_path.endswith('/home')
+key_path=os.path.join(scratch_home_path,'supervisor','receipt-secrets','route-receipt.key')
 assert os.stat(key_path).st_mode & 0o777 == 0o600
 with open(key_path,'r') as f: key=f.read().strip()
 from datetime import datetime, timezone
 started=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+if mode=='cold': time.sleep(4.5)
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def do_GET(self):
   if mode=='slow': time.sleep(30)
+  if mode=='auth-slow' and self.path.startswith('/api/v1/control/route-receipt'): time.sleep(4)
+  if mode=='broken':
+   print('Unhandled exception at /SECRET_DO_NOT_STORE token=KEY_DO_NOT_STORE',file=sys.stderr,flush=True)
+   os._exit(23)
   if mode=='handoff' and self.path=='/api/v1/control/route-receipt': time.sleep(30)
   if self.path=='/api/v1/version':
    payload={'release':release,'generation':8,'schema':6}
@@ -45,9 +50,12 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
 [IO.File]::WriteAllText((Join-Path $fixture 'release.json'),'{'+'"id":"rdummy1"'+'}',[Text.UTF8Encoding]::new($false))
 $cases = @(
  @{ name='positive-receipt'; mode='valid'; expected='finished'; valid=$true },
+ @{ name='cold-healthy'; mode='cold'; expected='finished'; valid=$true },
+ @{ name='slow-auth-cumulative'; mode='auth-slow'; expected='RECEIPT_TIMEOUT'; valid=$true },
+ @{ name='sanitized-startup-failure'; mode='broken'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true },
  @{ name='bad-route'; mode='bad-route'; expected='RECEIPT_ROUTE_MISMATCH'; valid=$true },
  @{ name='hung-http'; mode='slow'; expected='RECEIPT_TIMEOUT'; valid=$true },
- @{ name='handoff-hung-receipt'; mode='handoff'; expected='SETUP_FAILED'; valid=$true },
+ @{ name='handoff-hung-receipt'; mode='handoff'; expected='RECEIPT_TIMEOUT'; valid=$true },
  @{ name='bad-core'; mode='valid'; expected='CORE_MISMATCH'; valid=$false }
 )
 foreach($case in $cases) {
@@ -56,6 +64,7 @@ foreach($case in $cases) {
  $root="/tmp/ainur-rr-guard-fixed-$($case.name)-$([Guid]::NewGuid().ToString('N'))"
  $evidence="/tmp/ainur-rr-fixed-evidence-$([Guid]::NewGuid().ToString('N')).json"
  [IO.File]::WriteAllText($evidence,'{}',[Text.UTF8Encoding]::new($false))
+ [IO.File]::SetUnixFileMode($evidence,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
  $listener.Start();$port=([Net.IPEndPoint]$listener.LocalEndpoint).Port;$listener.Stop()
  $timer=[Diagnostics.Stopwatch]::StartNew()
@@ -65,10 +74,13 @@ foreach($case in $cases) {
  $timer.Stop()
  $record=Get-Content $evidence -Raw | ConvertFrom-Json
  if($record.stage -cne $case.expected -and $record.error_code -cne $case.expected) {throw "CASE_FAIL $($case.name) observed=$($record.error_code) stage=$($record.stage)"}
- if($timer.Elapsed.TotalSeconds -gt 12){throw "UNBOUNDED $($case.name) seconds=$($timer.Elapsed.TotalSeconds)"}
+ if($timer.Elapsed.TotalSeconds -gt 17){throw "UNBOUNDED including bounded stop $($case.name) seconds=$($timer.Elapsed.TotalSeconds)"}
+ if($case.name -eq 'sanitized-startup-failure' -and ($record.startup_diagnostic -cne 'UNHANDLED_EXCEPTION' -or ((Get-Content $evidence -Raw) -match 'SECRET_DO_NOT_STORE|KEY_DO_NOT_STORE'))){throw 'STARTUP_SIGNAL_MISSING_OR_SECRET_LEAK'}
+ if($case.valid -and ($record.child_disposition -ne 'EXIT_VERIFIED' -or $record.stopped -ne $true)){throw "UNKNOWN_CHILD_DISPOSITION $($case.name) stage=$($record.stage) error=$($record.error_code) disposition=$($record.child_disposition) stopped=$($record.stopped)"}
+ if(!$case.valid -and $record.child_disposition -ne 'NOT_STARTED'){throw "PRELAUNCH_STARTED_CHILD $($case.name)"}
  if($case.valid -and (!$record.stopped -or !$record.process_id -or !$record.process_started_utc)){throw "CHILD_UNIDENTIFIED_OR_LIVE $($case.name)"}
  if(!$case.valid -and $record.process_id){throw 'BAD_CORE_DISPATCHED'}
  if($case.name -eq 'positive-receipt' -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden')){throw 'POSITIVE_RECEIPT_MISSING'}
  "PASS $($case.name) $($record.stage) $($record.error_code) seconds=$([Math]::Round($timer.Elapsed.TotalSeconds,2))"
 }
-'PASSED=5'
+'PASSED=8'

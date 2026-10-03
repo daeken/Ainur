@@ -52,7 +52,8 @@ foreach($case in $cases) {
 	$name = $case.name
 	$root = if($case.ContainsKey('root')) { $case.root } else { "/tmp/ainur-rr-guard-$name-$([Guid]::NewGuid().ToString('N'))" }
 	$evidence = "/tmp/ainur-rr-guard-test-$([Guid]::NewGuid().ToString('N')).json"
-	if(!$case.ContainsKey('noEvidence')) { [IO.File]::WriteAllText($evidence,'{}',[Text.UTF8Encoding]::new($false)) }
+	if(!$case.ContainsKey('noEvidence')) { [IO.File]::WriteAllText($evidence,'{}',[Text.UTF8Encoding]::new($false))
+[IO.File]::SetUnixFileMode($evidence,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite) }
 	if($case.ContainsKey('symlink')) { [IO.Directory]::CreateSymbolicLink($root,$fixture) | Out-Null }
 	if($case.ContainsKey('stale')) { [IO.Directory]::CreateDirectory($root) | Out-Null; [IO.File]::WriteAllText((Join-Path $root '.scratch-owner'),'stale') }
 	if($case.ContainsKey('collision')) {

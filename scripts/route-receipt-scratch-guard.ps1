@@ -17,7 +17,47 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $process = $null
-$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; scratch_root = $null; error_code = $null }
+$receiptDeadline = $null
+# CLR callback required: PowerShell scriptblock events execute on thread-pool threads
+# without a Runspace and crash the host. Store ONLY allowlisted diagnostic codes.
+Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+public sealed class AinurRestrictedStartupCapture {
+    private readonly object gate = new object();
+    private int lines;
+    private int bytes;
+    private string diagnostic = "NONE";
+    public string Diagnostic { get { lock (gate) return diagnostic; } }
+    public void OnLine(object sender, DataReceivedEventArgs args) {
+        var data = args.Data;
+        if (data == null) return;
+        lock (gate) {
+            if (++lines > 1000 || (bytes += data.Length) > 65536 || data.Length > 4096) return;
+            var text = data.ToLowerInvariant();
+            if (diagnostic != "NONE") return;
+            if (text.Contains("address already in use")) diagnostic = "PORT_ALREADY_BOUND";
+            else if (text.Contains("failed to bind")) diagnostic = "BIND_FAILED";
+            else if (text.Contains("permission denied")) diagnostic = "PERMISSION_DENIED";
+            else if (text.Contains("unhandled exception")) diagnostic = "UNHANDLED_EXCEPTION";
+        }
+    }
+}
+'@ -ErrorAction Stop
+$capture = [AinurRestrictedStartupCapture]::new()
+$record = [ordered]@{ stage = 'setup'; created = $false; process_id = $null; process_started_utc = $null; process_executable = $null; port = $Port; exit_code = $null; stopped = $false; child_disposition = 'NOT_STARTED'; startup_diagnostic = 'NONE'; scratch_root = $null; error_code = $null }
+function Remaining-ReceiptTime([Diagnostics.Stopwatch]$Clock) {
+ $remainingMs = 12000 - [int]$Clock.ElapsedMilliseconds
+ if($remainingMs -le 0) { throw 'RECEIPT_TIMEOUT' }
+ return [TimeSpan]::FromMilliseconds($remainingMs)
+}
+function Stop-ExactChild([Diagnostics.Process]$Child) {
+ try {
+  if($Child.HasExited -or $Child.WaitForExit(750)) { return $true }
+  $Child.Kill($false) # exact child only; never process tree
+  return $Child.WaitForExit(2500)
+ } catch { return $false } # UNKNOWN_HOLD: no unproven exited claim
+}
 
 function Assert-NoSymbolicComponents([string]$FullPath) {
 	$path = [IO.Path]::GetFullPath($FullPath)
@@ -65,7 +105,8 @@ try {
 	if($ExpectedExecutableSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedReleaseId -notmatch '^r[A-Za-z0-9-]+$' -or
 		($PSBoundParameters.ContainsKey('ExpectedCoreSha256') -and ($ExpectedCoreSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $ExpectedServerSha256 -notmatch '^[A-Fa-f0-9]{64}$')) -or
 		(!$PSBoundParameters.ContainsKey('ExpectedCoreSha256') -and $PSBoundParameters.ContainsKey('ExpectedServerSha256'))) { throw 'INVALID_PIN' }
-	if($evidence.StartsWith($root + '/', [StringComparison]::Ordinal) -or ![IO.Directory]::Exists([IO.Path]::GetDirectoryName($evidence))) { throw 'UNSAFE_EVIDENCE' }
+	if($evidence.StartsWith($root + '/', [StringComparison]::Ordinal) -or ![IO.Directory]::Exists([IO.Path]::GetDirectoryName($evidence)) -or
+		$evidence -cnotmatch '^/tmp/ainur-rr-(?:fixed-evidence|guard-test|guard-evidence)-[A-Fa-f0-9]{32}\.json$') { throw 'UNSAFE_EVIDENCE' }
 	if(![IO.File]::Exists($evidence) -or [IO.Path]::GetDirectoryName($evidence) -cne '/tmp') { throw 'MISSING_EVIDENCE' }
 	# macOS /tmp is the well-known system symlink to /private/tmp; pin it exactly.
 	if([IO.Path]::GetFullPath((Get-Item -LiteralPath '/tmp' -Force).ResolvedTarget) -cne '/private/tmp') { throw 'UNSAFE_TEMP_ALIAS' }
@@ -75,6 +116,7 @@ try {
 	Assert-NoSymbolicComponents $exe
 	if((Get-Item -LiteralPath $evidence -Force).LinkTarget) { throw 'UNSAFE_EVIDENCE' }
 	if((Get-Item -LiteralPath $evidence -Force).Length -ne 2) { throw 'EVIDENCE_NOT_EMPTY' }
+	if([IO.File]::GetUnixFileMode($evidence) -ne ([IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)) { throw 'EVIDENCE_NOT_PRIVATE' }
 	if([IO.Directory]::Exists($root) -or [IO.File]::Exists($root) -or (Test-Path -LiteralPath $root -PathType Any)) { throw 'STALE_ROOT' }
 	if(![IO.Directory]::Exists($release) -or ![IO.File]::Exists($exe) -or [IO.Path]::GetDirectoryName($exe) -cne $release) { throw 'MISSING_RELEASE' }
 	Assert-NoSymbolicComponents (Join-Path $release 'release.json')
@@ -88,26 +130,32 @@ try {
 	$nonce = [Guid]::NewGuid().ToString('N')
 	[IO.File]::WriteAllText($marker,$nonce,[Text.UTF8Encoding]::new($false))
 	[IO.File]::SetUnixFileMode($marker,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
-	$scratchHome = Join-Path $root 'home'
-	[IO.Directory]::CreateDirectory($scratchHome) | Out-Null
-	[IO.File]::SetUnixFileMode($scratchHome,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
-	Assert-ScratchHome $scratchHome $root
+	$scratchHomePath = Join-Path $root 'home'
+	[IO.Directory]::CreateDirectory($scratchHomePath) | Out-Null
+	[IO.File]::SetUnixFileMode($scratchHomePath,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+	Assert-ScratchHome $scratchHomePath $root
 	$psi = [Diagnostics.ProcessStartInfo]::new($exe)
 	$psi.WorkingDirectory = $release
 	$psi.UseShellExecute = $false
+	# No inherited provider keys, user HOME, proxy settings or shell tool search paths.
+	$psi.Environment.Clear()
+	$psi.Environment['HOME'] = $scratchHomePath
+	$psi.Environment['TMPDIR'] = $root
+	$psi.Environment['PATH'] = '/usr/bin:/bin'
 	$psi.Environment['AINUR_VALIDATION'] = '1'
 	$psi.Environment['AINUR_OPENAI_ROUTE'] = 'subscription'
 	$psi.RedirectStandardOutput = $true
 	$psi.RedirectStandardError = $true
-	foreach($arg in @('--home',$scratchHome,'--port',"$Port",'--release',$ExpectedReleaseId) + $ChildArguments) { $psi.ArgumentList.Add($arg) }
+	foreach($arg in @('--home',$scratchHomePath,'--port',"$Port",'--release',$ExpectedReleaseId) + $ChildArguments) { $psi.ArgumentList.Add($arg) }
 	if($psi.FileName -cne $exe -or $psi.WorkingDirectory -cne $release -or
+		$psi.Environment['HOME'] -cne $scratchHomePath -or $psi.Environment['TMPDIR'] -cne $root -or
 		$psi.Environment['AINUR_VALIDATION'] -cne '1' -or $psi.Environment['AINUR_OPENAI_ROUTE'] -cne 'subscription' -or
 		$psi.ArgumentList.Count -lt 6 -or $psi.ArgumentList[0] -cne '--home' -or
 		$psi.ArgumentList[2] -cne '--port' -or $psi.ArgumentList[3] -cne "$Port" -or
 		$psi.ArgumentList[4] -cne '--release' -or $psi.ArgumentList[5] -cne $ExpectedReleaseId -or
 		@($ChildArguments | Where-Object { $_ -match '^--(home|port|release)(=|$)' }).Count -ne 0) { throw 'ARGV_MISMATCH' }
 	Assert-ScratchHome $psi.ArgumentList[1] $root
-	if((Get-Item -LiteralPath $root -Force).LinkTarget -or (Get-Item -LiteralPath $scratchHome -Force).LinkTarget) { throw 'SYMLINK_COMPONENT' }
+	if((Get-Item -LiteralPath $root -Force).LinkTarget -or (Get-Item -LiteralPath $scratchHomePath -Force).LinkTarget) { throw 'SYMLINK_COMPONENT' }
 	if($PSBoundParameters.ContainsKey('ExpectedCoreSha256')) {
 		if($ChildArguments.Count -ne 0) { throw 'RECEIPT_EXTRA_ARGS' }
 		$coreAssembly = Join-Path $release 'Ainur.Core.dll'
@@ -117,7 +165,7 @@ try {
 		if(![IO.File]::Exists($coreAssembly) -or (Get-FileHash -LiteralPath $coreAssembly -Algorithm SHA256).Hash -cne $ExpectedCoreSha256.ToUpperInvariant()) { throw 'CORE_MISMATCH' }
 		if(![IO.File]::Exists($serverAssembly) -or (Get-FileHash -LiteralPath $serverAssembly -Algorithm SHA256).Hash -cne $ExpectedServerSha256.ToUpperInvariant()) { throw 'SERVER_MISMATCH' }
 		# Provision only this new 0700 home. Key is never in argv, env, output or evidence.
-		$supervisor = Join-Path $scratchHome 'supervisor'
+		$supervisor = Join-Path $scratchHomePath 'supervisor'
 		$secrets = Join-Path $supervisor 'receipt-secrets'
 		foreach($directory in @($supervisor,$secrets)) {
 			[IO.Directory]::CreateDirectory($directory) | Out-Null
@@ -133,7 +181,7 @@ try {
 			$stream.Write($bytes)
 			$stream.Flush($true)
 		} finally { $stream.Dispose() }
-		Assert-ScratchHome $scratchHome $root
+		Assert-ScratchHome $scratchHomePath $root
 		Assert-NoSymbolicComponents $keyPath
 	}
 	# Recheck the release and marker immediately before child creation. Only this line may launch.
@@ -145,32 +193,41 @@ try {
 	$record.stage = 'launched'
 	$record.process_id = $process.Id
 	$record.process_executable = $exe
+	$receiptDeadline = [Diagnostics.Stopwatch]::StartNew()
+	# Consume both redirected streams concurrently, storing only allowlisted codes,
+	# never raw output, secret-bearing lines, command arguments or environment.
+	$process.add_OutputDataReceived([Diagnostics.DataReceivedEventHandler]$capture.OnLine)
+	$process.add_ErrorDataReceived([Diagnostics.DataReceivedEventHandler]$capture.OnLine)
+	$process.BeginOutputReadLine()
+	$process.BeginErrorReadLine()
 	# A fast-exiting child can vanish before StartTime is readable. Never claim
 	# a successful/identified launch from only a PID and prelaunch timestamp.
 	try { $started = $process.StartTime } catch { $started = $null }
 	if($null -eq $started) { throw 'START_IDENTITY_UNAVAILABLE' }
 	$record.process_started_utc = $started.ToUniversalTime().ToString('O')
 	if($PSBoundParameters.ContainsKey('ExpectedCoreSha256')) {
-		# Every HTTP operation has a fixed deadline; finally retains ownership of the child.
+		# One monotonic overall deadline spanning cold-start, auth negatives, positive and bodies.
 		$handler = [Net.Http.HttpClientHandler]::new()
 		$handler.UseProxy = $false
 		$handler.AllowAutoRedirect = $false
 		$client = [Net.Http.HttpClient]::new($handler)
-		$client.Timeout = [TimeSpan]::FromSeconds(2)
-		$probeDeadline = [Diagnostics.Stopwatch]::StartNew()
+		$client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+		$client.MaxResponseContentBufferSize = 65536
 		try {
 			$base = "http://127.0.0.1:$Port/api/v1"
 			$version = $null
-			while(!$version -and $probeDeadline.ElapsedMilliseconds -lt 3500) {
+			while(!$version) {
+				$null = Remaining-ReceiptTime $receiptDeadline
 				if($process.HasExited) { throw 'CHILD_EXITED_BEFORE_RECEIPT' }
 				try {
-					$versionResponse = $client.GetAsync("$base/version").WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult()
+					$versionResponse = $client.GetAsync("$base/version").WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult()
 					try {
 						if(!$versionResponse.IsSuccessStatusCode) { throw 'VERSION_HTTP_FAILED' }
-						$version = $versionResponse.Content.ReadAsStringAsync().WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult() | ConvertFrom-Json
+						$version = $versionResponse.Content.ReadAsStringAsync().WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult() | ConvertFrom-Json
 					} finally { $versionResponse.Dispose() }
 				} catch {
-					if($probeDeadline.ElapsedMilliseconds -ge 3500) { throw 'RECEIPT_TIMEOUT' }
+					if($receiptDeadline.ElapsedMilliseconds -ge 12000) { throw 'RECEIPT_TIMEOUT' }
+					if($process.HasExited) { throw 'CHILD_EXITED_BEFORE_RECEIPT' }
 					[Threading.Thread]::Sleep(75)
 				}
 			}
@@ -182,7 +239,7 @@ try {
 				try {
 					if($negative -eq 'invalid') { $deniedRequest.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',('0' * 64)) }
 					if($negative -eq 'query') { $deniedRequest.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$key) }
-					$denied = $client.SendAsync($deniedRequest).WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult()
+					$denied = $client.SendAsync($deniedRequest).WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult()
 					try { if([int]$denied.StatusCode -ne 403) { throw 'AUTH_NEGATIVE_FAILED' } }
 					finally { $denied.Dispose() }
 				} finally { $deniedRequest.Dispose() }
@@ -190,12 +247,13 @@ try {
 			$request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,"$base/control/route-receipt")
 			try {
 				$request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$key)
-				$response = $client.SendAsync($request).WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult()
+				$response = $client.SendAsync($request).WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult()
 				try {
 					if(!$response.IsSuccessStatusCode) { throw 'RECEIPT_HTTP_FAILED' }
-					$receipt = $response.Content.ReadAsStringAsync().WaitAsync([TimeSpan]::FromSeconds(2)).GetAwaiter().GetResult() | ConvertFrom-Json
+					$receipt = $response.Content.ReadAsStringAsync().WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult() | ConvertFrom-Json
 				} finally { $response.Dispose() }
 			} finally { $request.Dispose() }
+			$null = Remaining-ReceiptTime $receiptDeadline
 			if($process.HasExited) { throw 'RECEIPT_CHILD_EXITED' }
 			if($receipt.route_class -cne 'subscription' -or $receipt.provider_policy -cne 'openai_subscription_strict') { throw 'RECEIPT_ROUTE_MISMATCH' }
 			if($receipt.release -cne $ExpectedReleaseId -or $receipt.core_sha256 -cne $ExpectedCoreSha256.ToUpperInvariant()) { throw 'RECEIPT_PIN_MISMATCH' }
@@ -212,28 +270,31 @@ try {
 			$record.generation = [int]$receipt.generation
 		} finally { $client.Dispose() }
 	}
-	$process.WaitForExit(5000) | Out-Null
-	if(!$process.HasExited) { $process.Kill(); $process.WaitForExit() }
-	$record.exit_code = $process.ExitCode
-	$record.stopped = $process.HasExited
 	$record.stage = 'finished'
 } catch {
-	$record.error_code = if($_.Exception.Message -match '^[A-Z_]+$') { $_.Exception.Message } else { 'SETUP_FAILED' }
+	$record.error_code = if($receiptDeadline -and $receiptDeadline.ElapsedMilliseconds -ge 12000) { 'RECEIPT_TIMEOUT' }
+		elseif($_.Exception.Message -match '^[A-Z_]+$') { $_.Exception.Message } else { 'SETUP_FAILED' }
 	$record.stage = 'failed'
 } finally {
 	if($process) {
-		if(!$process.HasExited) { $process.Kill(); $process.WaitForExit() }
-		$record.exit_code = $process.ExitCode
-		$record.stopped = $process.HasExited
+		$record.stopped = Stop-ExactChild $process
+		$record.child_disposition = if($record.stopped) { 'EXIT_VERIFIED' } else { 'UNKNOWN_HOLD' }
+		if($record.stopped) { try { $record.exit_code = $process.ExitCode } catch {} }
+		$record.startup_diagnostic = $capture.Diagnostic
+		if(!$record.stopped) { $record.stage = 'unknown_hold'; $record.error_code = 'CHILD_DISPOSITION_UNKNOWN_HOLD' }
 		$process.Dispose()
 	}
-	if([IO.Path]::IsPathFullyQualified($EvidencePath) -and [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($EvidencePath)) -ceq '/tmp' -and
-		[IO.File]::Exists($EvidencePath) -and !(Get-Item -LiteralPath $EvidencePath -Force).LinkTarget -and
-		[IO.File]::ReadAllText($EvidencePath) -ceq '{}') {
-		[IO.File]::WriteAllText($EvidencePath,($record | ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
-	}
+	try {
+		if([IO.Path]::IsPathFullyQualified($EvidencePath) -and [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($EvidencePath)) -ceq '/tmp' -and
+			$EvidencePath -match '^/tmp/ainur-rr-(?:fixed-evidence|guard-test|guard-evidence)-[A-Fa-f0-9]{32}\.json$' -and
+			[IO.File]::Exists($EvidencePath) -and !(Get-Item -LiteralPath $EvidencePath -Force).LinkTarget -and
+			[IO.File]::GetUnixFileMode($EvidencePath) -eq ([IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite) -and
+			[IO.File]::ReadAllText($EvidencePath) -ceq '{}') {
+			[IO.File]::WriteAllText($EvidencePath,($record | ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+		}
+	} catch { $record.stage = 'unknown_hold'; $record.error_code = 'EVIDENCE_WRITE_UNKNOWN_HOLD' }
 	# No cleanup here: a separate, independently scoped owner must verify the marker
 	# and path identities before touching even a newly created scratch directory.
 }
-if($record.stage -eq 'failed') { throw "Scratch guard failed: $($record.error_code)" }
+if($record.stage -ne 'finished') { throw "Scratch guard failed: $($record.error_code)" }
 $record
