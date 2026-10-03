@@ -1,0 +1,38 @@
+{
+  "planVersion": "strict-target-guard-mock-v1",
+  "enabled": false,
+  "policy": "subscription-only-explicit-reject-paid-all-entry-paths",
+  "legacyForbidden": "e022,766,01d6-without-strict-acceptance",
+  "sourceSha": "3fea1c759ab9c618caeaf306bf9294f15d4d00c9",
+  "supervisorSourceSha": "UNISSUED",
+  "independentStrictGateSha": "UNISSUED",
+  "supervisorAutoTargetGateSha": "UNISSUED",
+  "initial": {
+    "release": "r20261003-strict-rollback-c7483aea823b",
+    "physicalPath": "/tmp/ainur-strict-release-stage-ce6b485f6aa6474881550ea1127a1865/rollback",
+    "coreSha": "82872306F358F886B97D198AAD42D57A05CD9F3484ABB11179C760821B8758CD",
+    "serverSha": "90E772775B6017A70E73ABB737C11EBA5FAA0FB374B2FDD6E57D2693F9BB0F50",
+    "payloadManifestSha": "E5D1AC6507E8CE4D55D63D80915CF2F0AC31E9E920FBDEF2B4F5621F615737B8",
+    "sourceSha": "3fea1c759ab9c618caeaf306bf9294f15d4d00c9",
+    "strictReceiptSha": "UNISSUED",
+    "routeReceiptSha": "UNISSUED",
+    "providerPolicy": "openai_subscription_strict",
+    "strictMode": "UNATTESTED",
+    "exeSha": "1E8391DC3F39C17E89FC3E2D41745A2AF7237A14E3EDCB5C77A4B610C5B72CB9"
+  },
+  "candidate": {
+    "release": "r20261003-strict-candidate-19f497b1fd0a",
+    "physicalPath": "/tmp/ainur-strict-release-stage-ce6b485f6aa6474881550ea1127a1865/candidate",
+    "coreSha": "82872306F358F886B97D198AAD42D57A05CD9F3484ABB11179C760821B8758CD",
+    "serverSha": "90E772775B6017A70E73ABB737C11EBA5FAA0FB374B2FDD6E57D2693F9BB0F50",
+    "payloadManifestSha": "E5D1AC6507E8CE4D55D63D80915CF2F0AC31E9E920FBDEF2B4F5621F615737B8",
+    "sourceSha": "3fea1c759ab9c618caeaf306bf9294f15d4d00c9",
+    "strictReceiptSha": "UNISSUED",
+    "routeReceiptSha": "UNISSUED",
+    "providerPolicy": "openai_subscription_strict",
+    "strictMode": "UNATTESTED",
+    "exeSha": "1E8391DC3F39C17E89FC3E2D41745A2AF7237A14E3EDCB5C77A4B610C5B72CB9"
+  },
+  "sourceTreeSha": "8655fe7b43fe54ac810cde7d27e540c05f990fdb",
+  "supervisorBinarySha": "UNISSUED"
+}

@@ -1,0 +1,41 @@
+{
+  "readOnlyOldFence": true,
+  "stoppedDbBackupIntegrity": true,
+  "sourceDbPreserved": true,
+  "knownConsequential": false,
+  "scope": "unique-parent-child-listener-approved",
+  "supervisorLaunchAllowlist": "r20261003-strict-rollback-c7483aea823b,r20261003-strict-candidate-19f497b1fd0a",
+  "supervisorAutoRecoveryAllowlist": "r20261003-strict-rollback-c7483aea823b,r20261003-strict-candidate-19f497b1fd0a",
+  "supervisorObservedActive": "r20261003-strict-rollback-c7483aea823b",
+  "supervisorObservedPrevious": "r20261003-strict-candidate-19f497b1fd0a",
+  "supervisorFallbackIfUnknown": "HOLD_NO_SPAWN",
+  "allPathsGateBeforeSpawn": true,
+  "supervisorSourceSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "independentSupervisorGateSha": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "initial": {
+    "release": "r20261003-strict-rollback-c7483aea823b",
+    "coreSha": "82872306F358F886B97D198AAD42D57A05CD9F3484ABB11179C760821B8758CD",
+    "serverSha": "90E772775B6017A70E73ABB737C11EBA5FAA0FB374B2FDD6E57D2693F9BB0F50",
+    "strictReceiptSha": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "routeReceiptSha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "routeClass": "subscription",
+    "strictMode": "enforced",
+    "childBinding": "sole-listener-PID-start-loaded-Core"
+  },
+  "candidate": {
+    "release": "r20261003-strict-candidate-19f497b1fd0a",
+    "coreSha": "82872306F358F886B97D198AAD42D57A05CD9F3484ABB11179C760821B8758CD",
+    "serverSha": "90E772775B6017A70E73ABB737C11EBA5FAA0FB374B2FDD6E57D2693F9BB0F50",
+    "strictReceiptSha": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "routeReceiptSha": "0000000000000000000000000000000000000000000000000000000000000000",
+    "routeClass": "subscription",
+    "strictMode": "enforced",
+    "childBinding": "sole-listener-PID-start-loaded-Core"
+  },
+  "outcome": "candidate-ready",
+  "oldRuntimeAutoFallback": false,
+  "restoreOlderDbOverNewer": false,
+  "childAction": "VALIDATE_RECEIPT_ONLY",
+  "targetRelease": "r20261003-strict-candidate-19f497b1fd0a",
+  "noFurtherSpawn": true
+}

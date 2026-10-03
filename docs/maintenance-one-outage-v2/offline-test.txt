@@ -1,3 +1,4 @@
+offline-invocation-tests.ps1 exit=0
 PASS normal exit=0 receipts=14 ops=25 retryBlocked=1
 PASS rolled-back exit=0 receipts=14 ops=25 retryBlocked=1
 PASS final-pid-drift exit=1 receipts=14 ops=25 retryBlocked=1
@@ -12,11 +13,28 @@ PASS backup-failed exit=1 receipts=3 ops=2 retryBlocked=1
 PASS child-survives exit=1 receipts=8 ops=12 retryBlocked=1
 PASS install-failed exit=1 receipts=11 ops=15 retryBlocked=1
 PASS: 13 offline adapter-invocation cases; NO native adapter supplied, NO live controls
-controller exit=0
+offline-proof-fd-tests.ps1 exit=0
 PASS owned private single-link regular same-FD SHA read
 PASS reject forged digest
 PASS reject FIFO nonblocking
 PASS reject hardlink nlink2
 PASS reject symlink nofollow
 PASS path replace adversary after verified fstat: FD bytes remain original
-singleFD exit=0
+offline-strict-target-tests.ps1 exit=0
+PASS candidate ready dual strict target authorized mock-only receipt
+PASS contained strict rollback target authorized mock-only receipt
+PASS same-source common failure no old binary/retry/DB restore authorized mock-only receipt
+PASS common failure incorrectly auto rollback STRICT_HOLD before receipt
+PASS stale previous 766 STRICT_HOLD before receipt
+PASS old active e022 on restart STRICT_HOLD before receipt
+PASS stale auto recovery allowlist STRICT_HOLD before receipt
+PASS startup path lacks policy gate STRICT_HOLD before receipt
+PASS implicit old runtime fallback STRICT_HOLD before receipt
+PASS overwrite newer committed DB STRICT_HOLD before receipt
+PASS initial all-child enforcement absent STRICT_HOLD before receipt
+PASS candidate per-child receipt mismatch STRICT_HOLD before receipt
+PASS strict release physical Core mismatch STRICT_HOLD before receipt
+PASS shared attestation token not child-specific STRICT_HOLD before receipt
+PASS historical 766 candidate not strict STRICT_HOLD before receipt
+PASS source-only no supervisor/individual receipts cannot proceed STRICT_HOLD before receipt
+PASS all strict target offline cases, no native actions
