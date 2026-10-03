@@ -285,7 +285,7 @@ try {
 				$response = $client.SendAsync($request).WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult()
 				try {
 					if(!$response.IsSuccessStatusCode) { throw 'RECEIPT_HTTP_FAILED' }
-					$receipt = $response.Content.ReadAsStringAsync().WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult() | ConvertFrom-Json
+					$receipt = $response.Content.ReadAsStringAsync().WaitAsync((Remaining-ReceiptTime $receiptDeadline)).GetAwaiter().GetResult() | ConvertFrom-Json -DateKind String
 				} finally { $response.Dispose() }
 			} finally { $request.Dispose() }
 			$null = Remaining-ReceiptTime $receiptDeadline
@@ -293,7 +293,9 @@ try {
 			if($receipt.route_class -cne 'subscription' -or $receipt.provider_policy -cne 'openai_subscription_strict') { throw 'RECEIPT_ROUTE_MISMATCH' }
 			if($receipt.release -cne $ExpectedReleaseId -or $receipt.core_sha256 -cne $ExpectedCoreSha256.ToUpperInvariant()) { throw 'RECEIPT_PIN_MISMATCH' }
 			if([int]$receipt.process_id -ne $process.Id -or [int]$receipt.generation -ne [int]$version.generation) { throw 'RECEIPT_IDENTITY_MISMATCH' }
-			$reportedStart = [DateTimeOffset]::Parse([string]$receipt.process_started_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal)
+			$startText = $receipt.process_started_utc
+			$reportedStart = [DateTimeOffset]::MinValue
+			if($startText -isnot [string] -or $startText -cnotmatch '(?:Z|[+-][0-9]{2}:[0-9]{2})$' -or !$startText.Contains('T') -or ![DateTimeOffset]::TryParseExact($startText,'yyyy-MM-ddTHH:mm:ss.FFFFFFFK',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::None,[ref]$reportedStart)) { throw 'RECEIPT_START_INVALID' }
 			$startDelta = [Math]::Abs(($reportedStart.ToUniversalTime() - $started.ToUniversalTime()).TotalSeconds)
 			$record.start_delta_seconds = [Math]::Min(999999,[Math]::Round($startDelta,3))
 			if($startDelta -gt 2) { throw 'RECEIPT_START_MISMATCH' }

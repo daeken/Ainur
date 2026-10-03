@@ -23,8 +23,11 @@ assert scratch_home_path.startswith('/tmp/ainur-rr-guard-') and scratch_home_pat
 key_path=os.path.join(scratch_home_path,'supervisor','receipt-secrets','route-receipt.key')
 assert os.stat(key_path).st_mode & 0o777 == 0o600
 with open(key_path,'r') as f: key=f.read().strip()
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 started=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+if mode=='offset-five': started=datetime.now(timezone.utc).astimezone(timezone(-timedelta(hours=5))).isoformat()
+if mode=='offset-tamper': started=(datetime.now(timezone.utc)-timedelta(hours=5)).isoformat().replace('+00:00','Z')
+if mode=='no-offset': started=datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 if mode=='cold': time.sleep(4.5)
 failures={
  'sqlite': ('Unhandled exception. Microsoft.Data.Sqlite.SqliteException: database /SECRET_DO_NOT_STORE token=KEY_DO_NOT_STORE',
@@ -69,6 +72,9 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
 [IO.File]::WriteAllText((Join-Path $fixture 'release.json'),'{'+'"id":"rdummy1"'+'}',[Text.UTF8Encoding]::new($false))
 $cases = @(
  @{ name='positive-receipt'; mode='valid'; expected='finished'; valid=$true },
+ @{ name='offset-five-valid'; mode='offset-five'; expected='finished'; valid=$true },
+ @{ name='offset-five-tampered'; mode='offset-tamper'; expected='RECEIPT_START_MISMATCH'; valid=$true },
+ @{ name='offset-missing'; mode='no-offset'; expected='RECEIPT_START_INVALID'; valid=$true },
  @{ name='cold-healthy'; mode='cold'; expected='finished'; valid=$true },
  @{ name='slow-auth-cumulative'; mode='auth-slow'; expected='RECEIPT_TIMEOUT'; valid=$true },
  @{ name='sanitized-startup-failure'; mode='broken'; expected='CHILD_EXITED_BEFORE_RECEIPT'; valid=$true; diagnostic='UNHANDLED_EXCEPTION'; kind='UNCLASSIFIED'; component='UNKNOWN'; site='UNKNOWN' },
@@ -107,7 +113,9 @@ foreach($case in $cases) {
  if(!$case.valid -and $record.child_disposition -ne 'NOT_STARTED'){throw "PRELAUNCH_STARTED_CHILD $($case.name)"}
  if($case.valid -and (!$record.stopped -or !$record.process_id -or !$record.process_started_utc)){throw "CHILD_UNIDENTIFIED_OR_LIVE $($case.name)"}
  if(!$case.valid -and $record.process_id){throw 'BAD_CORE_DISPATCHED'}
- if($case.name -eq 'positive-receipt' -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden')){throw 'POSITIVE_RECEIPT_MISSING'}
+ if($case.name -in @('positive-receipt','offset-five-valid') -and ($record.route_class -cne 'subscription' -or $record.provider_policy -cne 'openai_subscription_strict' -or $record.core_sha256 -cne $coreHash -or $record.auth_negative -cne 'absent-invalid-query-forbidden' -or $record.start_delta_seconds -gt 2)){throw 'POSITIVE_RECEIPT_MISSING'}
+ if($case.name -eq 'offset-five-tampered' -and ($record.start_delta_seconds -lt 17998 -or $record.start_delta_seconds -gt 18002 -or $record.PSObject.Properties.Name -contains 'route_class')){throw 'TAMPERED_OFFSET_NOT_REJECTED'}
+ if($case.name -eq 'offset-missing' -and $record.PSObject.Properties.Name -contains 'route_class'){throw 'MISSING_OFFSET_NOT_REJECTED'}
  "PASS $($case.name) $($record.stage) $($record.error_code) seconds=$([Math]::Round($timer.Elapsed.TotalSeconds,2))"
 }
-'PASSED=15'
+'PASSED=18'
