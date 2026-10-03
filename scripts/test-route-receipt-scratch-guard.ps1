@@ -45,7 +45,11 @@ $cases = @(
 	@{ name = 'missing-release'; expected = 'MISSING_RELEASE'; missing = $true },
 	@{ name = 'bad-pin'; expected = 'EXECUTABLE_MISMATCH'; wrongHash = $true },
 	@{ name = 'missing-evidence'; expected = 'MISSING_EVIDENCE'; noEvidence = $true },
-	@{ name = 'argv-home-override'; expected = 'ARGV_MISMATCH'; override = $true }
+	@{ name = 'argv-home-override'; expected = 'ARGV_MISMATCH'; override = $true },
+	@{ name = 'callback-positive'; expected = 'finished'; callback = $true },
+	@{ name = 'callback-prestart-fails'; expected = 'PRESTART_FAILED'; prestartFails = $true },
+	@{ name = 'callback-running-fails'; expected = 'RUNNING_CHECK_FAILED'; runningFails = $true },
+	@{ name = 'callback-no-prestart-on-bad-pin'; expected = 'EXECUTABLE_MISMATCH'; wrongHash = $true; callback = $true }
 )
 $results = @()
 foreach($case in $cases) {
@@ -62,6 +66,26 @@ foreach($case in $cases) {
 	$exe = if($case.ContainsKey('fast')) { Join-Path $fixture 'fast-dummy' } elseif($case.ContainsKey('envDummy')) { $envDummy } else { Join-Path $fixture 'dummy' }
 	$args = @{ TempRoot=$root; Executable=$exe; ReleaseDirectory=$(if($case.ContainsKey('missing')) { "/tmp/ainur-rr-missing-$([Guid]::NewGuid().ToString('N'))" } else { $fixture }); ExpectedExecutableSha256=$(if($case.ContainsKey('wrongHash')) { '0'*64 } elseif($case.ContainsKey('fast')) { $fastHash } elseif($case.ContainsKey('envDummy')) { $envHash } else { $hash }); ExpectedReleaseId='rdummy1'; Port=57001; EvidencePath=$evidence; ChildArguments=$(if($case.ContainsKey('fast') -or $case.ContainsKey('envDummy')) { @() } else { @('1') }) }
 	if($case.ContainsKey('override')) { $args.ChildArguments = @('--home','/Users/daeken') }
+	$callbackProof = Join-Path $fixture "callback-$name"
+	if($case.ContainsKey('callback') -or $case.ContainsKey('prestartFails') -or $case.ContainsKey('runningFails')) {
+		$mustFailPre = $case.ContainsKey('prestartFails')
+		$mustFailRunning = $case.ContainsKey('runningFails')
+		$args.BeforeStart = {
+			param($childHome)
+			if($childHome -cne (Join-Path $root 'home') -or $childHome -notlike '/tmp/ainur-rr-guard-*/home') { throw 'CALLBACK_UNSAFE_HOME' }
+			if($mustFailPre) { throw 'BOUNDED_PRESTART_ERROR' }
+			[IO.File]::WriteAllText((Join-Path $childHome 'provisioned'),'VALIDATED')
+			[IO.File]::WriteAllText($callbackProof,'before')
+		}.GetNewClosure()
+		$args.WhileRunning = {
+			param($childHome,$loopbackPort,$pidValue,$started)
+			if($mustFailRunning) { throw 'BOUNDED_RUNNING_ERROR' }
+			if($loopbackPort -ne 57001 -or $pidValue -le 0 -or !$started -or
+				!([IO.File]::Exists((Join-Path $childHome 'provisioned'))) -or
+				[IO.File]::ReadAllText((Join-Path $childHome 'provisioned')) -cne 'VALIDATED') { throw 'CALLBACK_CONTEXT_MISMATCH' }
+			[IO.File]::AppendAllText($callbackProof,';running')
+		}.GetNewClosure()
+	}
 	$outcome = $null
 	$launchesBefore = if(Test-Path -LiteralPath $launchLog) { @(Get-Content -LiteralPath $launchLog).Count } else { 0 }
 	$oldValidation = [Environment]::GetEnvironmentVariable('AINUR_VALIDATION')
@@ -75,11 +99,18 @@ foreach($case in $cases) {
 		[Environment]::SetEnvironmentVariable('AINUR_OPENAI_ROUTE',$oldRoute)
 	}
 	if($case.ContainsKey('envDummy') -and (Get-Content -LiteralPath $envResult -Raw).Trim() -cne 'PINNED') { throw 'CHILD_ENV_NOT_PINNED' }
+	if($case.ContainsKey('callback')) {
+		if($case.expected -eq 'finished' -and (![IO.File]::Exists($callbackProof) -or [IO.File]::ReadAllText($callbackProof) -cne 'before;running')) { throw 'CALLBACK_PROOF_MISSING' }
+		if($case.expected -ne 'finished' -and [IO.File]::Exists($callbackProof)) { throw 'CALLBACK_RAN_BEFORE_GATE' }
+	}
 	$launchesAfter = if(Test-Path -LiteralPath $launchLog) { @(Get-Content -LiteralPath $launchLog).Count } else { 0 }
 	if($case.ContainsKey('fast') -or $case.ContainsKey('envDummy')) {
 		if($launchesAfter -ne $launchesBefore) { throw 'UNEXPECTED_DUMMY_LAUNCH' }
 	} elseif($case.expected -eq 'finished') {
 		if($launchesAfter -ne ($launchesBefore + 1)) { throw "POSITIVE_CHILD_NOT_LAUNCHED name=$name" }
+	} elseif($case.ContainsKey('runningFails')) {
+		# Failure can reach the callback before the shell child writes its marker.
+		if($launchesAfter -lt $launchesBefore -or $launchesAfter -gt ($launchesBefore + 1)) { throw "INVALID_RUNNING_CHILD_COUNT name=$name" }
 	} elseif($launchesAfter -ne $launchesBefore) { throw "SETUP_FAILURE_LAUNCHED_CHILD name=$name" }
 	if($case.ContainsKey('fast') -and $outcome -ceq 'finished') {
 		$captured = Get-Content $evidence -Raw | ConvertFrom-Json

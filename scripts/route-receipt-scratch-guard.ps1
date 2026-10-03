@@ -9,7 +9,10 @@ param(
 	[Parameter(Mandatory)] [string]$ExpectedReleaseId,
 	[Parameter(Mandatory)] [int]$Port,
 	[Parameter(Mandatory)] [string]$EvidencePath,
-	[Parameter()] [string[]]$ChildArguments = @()
+	[Parameter()] [string[]]$ChildArguments = @(),
+	# Reviewed callbacks run inside the guard's ownership window. Never return secrets.
+	[Parameter()] [scriptblock]$BeforeStart,
+	[Parameter()] [scriptblock]$WhileRunning
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -103,6 +106,12 @@ try {
 		@($ChildArguments | Where-Object { $_ -match '^--(home|port|release)(=|$)' }).Count -ne 0) { throw 'ARGV_MISMATCH' }
 	Assert-ScratchHome $psi.ArgumentList[1] $root
 	if((Get-Item -LiteralPath $root -Force).LinkTarget -or (Get-Item -LiteralPath $scratchHome -Force).LinkTarget) { throw 'SYMLINK_COMPONENT' }
+	# Provision only inside this newly owned scratch home, before a server could read it.
+	if($BeforeStart) {
+		try { $null = & $BeforeStart $scratchHome } catch { throw 'PRESTART_FAILED' }
+		Assert-ScratchHome $scratchHome $root
+		Assert-NoSymbolicComponents $scratchHome
+	}
 	# Recheck the release and marker immediately before child creation. Only this line may launch.
 	if((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $ExpectedExecutableSha256.ToUpperInvariant() -or
 		(Get-Content -LiteralPath $marker -Raw) -cne $nonce) { throw 'PIN_CHANGED' }
@@ -115,6 +124,13 @@ try {
 	try { $started = $process.StartTime } catch { $started = $null }
 	if($null -eq $started) { throw 'START_IDENTITY_UNAVAILABLE' }
 	$record.process_started_utc = $started.ToUniversalTime().ToString('O')
+	if($WhileRunning) {
+		# Callback receives only process identity + loopback port and scratch home;
+		# no key, executable substitution, outside-home path or mutable Process object.
+		try { $null = & $WhileRunning $scratchHome $Port $record.process_id $record.process_started_utc }
+		catch { throw 'RUNNING_CHECK_FAILED' }
+		Assert-ScratchHome $scratchHome $root
+	}
 	$process.WaitForExit(5000) | Out-Null
 	if(!$process.HasExited) { $process.Kill(); $process.WaitForExit() }
 	$record.exit_code = $process.ExitCode
