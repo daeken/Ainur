@@ -1,0 +1,30 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.rsuser
+.vs/
+.idea/
+*.DotSettings.user
+TestResults/
+*.trx
+coverage*.json
+coverage*.xml
+artifacts/
+
+# Node / Vite
+node_modules/
+web/dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# Ainur local state (database, artifacts, releases)
+.ainur/
+*.db
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
+src/Ainur.Server/wwwroot/

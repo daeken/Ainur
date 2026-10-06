@@ -1,0 +1,466 @@
+using System.Collections.Concurrent;
+using System.Text;
+using Ainur.Core.Accounting;
+using Ainur.Core.Browser;
+using Ainur.Core.Context;
+using Ainur.Core.Model;
+using Ainur.Core.Persistence;
+using Ainur.Core.Providers;
+using Ainur.Core.Tools;
+using Dapper;
+
+namespace Ainur.Core.Runtime;
+
+public sealed class RuntimeOptions {
+	public string Home { get; set; } = DefaultHome();
+	public string ManagerModelId { get; set; } = "deepseek-v4.1-flash";
+	public string SpecialistModelId { get; set; } = "deepseek-v4.1-flash";
+	public string CheapModelId { get; set; } = "deepseek-v4.1-flash";
+	public string EngineeringModelId { get; set; } = "gpt-6.1-sol";
+	public bool AllowApiModelsForEngineering { get; set; }
+	public decimal DefaultBudgetDollars { get; set; } = 5m;
+	public int MaxStepsPerWake { get; set; } = 80;
+	public TimeSpan ModelCallTimeout { get; set; } = TimeSpan.FromMinutes(10);
+	public TimeSpan ModelStreamIdleTimeout { get; set; } = TimeSpan.FromSeconds(90);
+	public int MaxOutputTokens { get; set; } = 32_000;
+	public ContextPolicy PersistentPolicy { get; set; } = new();
+	public ContextPolicy EphemeralPolicy { get; set; } = new() { ElideAfterTurns = 4 };
+	/// <summary>Optional per-session override, e.g. to give a test session a tiny window.</summary>
+	public Func<Agent, Session, ContextPolicy?>? PolicyOverride { get; set; }
+	public bool AutoStartHosts { get; set; } = true;
+	/// <summary>Opt in agent turns on OpenAI models to native web search (additional input-token usage).</summary>
+	public bool EnableOpenAiWebSearch { get; set; }
+
+	public static RuntimeOptions FromEnvironment(string home) => new() {
+		Home = home,
+		ManagerModelId = Environment.GetEnvironmentVariable("AINUR_MANAGER_MODEL") ?? "deepseek-v4.1-flash",
+		SpecialistModelId = Environment.GetEnvironmentVariable("AINUR_SPECIALIST_MODEL") ?? "deepseek-v4.1-flash",
+		CheapModelId = Environment.GetEnvironmentVariable("AINUR_CHEAP_MODEL") ?? "deepseek-v4.1-flash",
+		EngineeringModelId = Environment.GetEnvironmentVariable("AINUR_ENGINEERING_MODEL") ?? "gpt-6.1-sol",
+		AllowApiModelsForEngineering = Environment.GetEnvironmentVariable("AINUR_ENGINEERING_ALLOW_API") == "1",
+		AutoStartHosts = Environment.GetEnvironmentVariable("AINUR_VALIDATION") != "1",
+	};
+
+	public static string DefaultHome() => Environment.GetEnvironmentVariable("AINUR_HOME") is { Length: > 0 } h ? h
+		: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ainur");
+}
+
+/// <summary>
+/// The scheduler and organization runtime: owns session hosts, recovery, communication, and the operations
+/// that tools and the API perform on projects, agents, objectives, and sessions.
+/// </summary>
+public sealed partial class AinurRuntime : IDisposable {
+	public readonly RuntimeOptions Options;
+	public readonly Db Db;
+	public readonly Store Store;
+	public readonly Ledger Ledger;
+	public readonly ArtifactStore Artifacts;
+	public readonly ProviderRegistry Providers;
+	public readonly ModelGateway Gateway;
+	public readonly MaintenanceCoordinator Maintenance;
+	public readonly QuotaManager Quotas;
+	public readonly ToolRegistry Tools;
+	public readonly Compactor Compactor;
+	public readonly Watchdog Watchdog;
+	public long Generation { get; private set; }
+	public volatile bool Draining;
+	internal SessionHost? CoordinationHost(string sessionId) => Hosts.GetValueOrDefault(sessionId);
+	internal readonly object AdmissionGate = new();
+	long DrainEpoch;
+	readonly ConcurrentDictionary<string, SessionHost> Hosts = new();
+	readonly ConcurrentDictionary<string, int> Failures = new();
+	public event Action<string, StreamDelta>? Delta;
+
+	public AinurRuntime(RuntimeOptions options, ProviderRegistry? providers = null) {
+		Options = options;
+		Directory.CreateDirectory(options.Home);
+		Db = new Db(Path.Combine(options.Home, "ainur.db"));
+		Store = new Store(Db);
+		Ledger = new Ledger(Store);
+		Artifacts = new ArtifactStore(Path.Combine(options.Home, "artifacts"));
+		Providers = providers ?? DefaultProviders();
+		Quotas = new QuotaManager(options.Home);
+		Maintenance = new MaintenanceCoordinator(this);
+		Gateway = new ModelGateway(Store, Ledger, Artifacts, Providers, Quotas) { Admission = call => Maintenance.Admit("model", call.SessionId), FullCallTimeout = options.ModelCallTimeout, StreamIdleTimeout = options.ModelStreamIdleTimeout };
+		Tools = new ToolRegistry(Store);
+		Compactor = new Compactor(Store, Gateway);
+		Watchdog = new Watchdog(Path.Combine(options.Home, "runtime", "inflight.json"));
+		ModelCatalog.EnsureSeeded(Store);
+		BuiltinTools.RegisterAll(this);
+		AgentTools.LoadPersisted(this);
+	}
+
+	public static ProviderRegistry DefaultProviders() {
+		var registry = new ProviderRegistry();
+		registry.Register(DeepSeekProvider.CreateDefault());
+		registry.Register(ZaiProvider.CreateDefault());
+		registry.Register(OpenAiProvider.CreateDefault());
+		BedrockResponsesProvider.RegisterConfigured(registry);
+		return registry;
+	}
+
+	// ---- Lifecycle and recovery ----
+
+	public void Start(string? release = null) {
+		Generation = Db.Write(u => {
+			var gen = (u.Scalar<long?>("SELECT MAX(generation) FROM runtime_generations") ?? 0) + 1;
+			u.Execute("UPDATE runtime_generations SET stopped_at=COALESCE(stopped_at,@now), stop_reason=COALESCE(stop_reason,'unclean') WHERE stopped_at IS NULL", new { now = Clock.Now });
+			u.Execute("INSERT INTO runtime_generations(generation,release,started_at) VALUES(@gen,@release,@now)", new { gen, release, now = Clock.Now });
+			u.Journal("runtime.started", null, payload: new { generation = gen, release });
+			return gen;
+		});
+		Recover();
+		McpClients = McpLoader.LoadAsync(this, CancellationToken.None).GetAwaiter().GetResult();
+		Maintenance.Recover();
+		ExpiryTimer = new Timer(_ => { try { ExpirePauses(); WorkContinuity.Reconcile(this); } catch(Exception e) { Console.Error.WriteLine($"[expiry] {e.Message}"); } }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+		if(!Options.AutoStartHosts) return;
+		WorkContinuity.Reconcile(this);
+		foreach(var agent in Store.ListLiveAgents())
+			if(agent.PrimarySessionId is not null && agent.State != AgentStates.Paused)
+				Wake(agent.Id);
+		foreach(var session in Store.ActiveSessions().Where(s => s.Kind != "primary"))
+			GetHost(session.Id)?.Wake();
+	}
+
+	/// <summary>
+	/// Reconciles state left by an unclean stop: interrupted invocations become unknown (never blindly retried),
+	/// dispatched model requests keep conservative charges, and affected sessions receive an explicit notice.
+	/// </summary>
+	public void Recover() {
+		var restartReason = ReadRestartReason();
+		var interrupted = Store.InvocationsInState(InvocationStates.Running, InvocationStates.Queued);
+		foreach(var inv in interrupted) {
+			var wasQueued = inv.State == InvocationStates.Queued;
+			var culprit = restartReason?.InvocationId == inv.Id;
+			Db.Write(u => {
+				inv.State = wasQueued ? InvocationStates.Canceled : InvocationStates.Unknown;
+				inv.Error = wasQueued ? "NOT EXECUTED: runtime stopped before tool admission." : culprit ? $"Runtime was force-restarted while this invocation ran past its deadline ({restartReason!.Reason})." : "Runtime stopped while this invocation was running; its outcome is unknown.";
+				inv.FinishedAt = Clock.Now;
+				Store.UpdateInvocation(u, inv);
+				if(culprit) {
+					u.Execute("UPDATE tool_versions SET state='quarantined' WHERE id=@ToolVersion AND kind != 'builtin'", inv);
+					u.Journal("tool.quarantine_considered", inv.ProjectId, "tool_invocation", inv.Id, inv.AgentId, new { inv.ToolVersion });
+				}
+			});
+			if(inv.ParentInvocationId is not null) continue;
+			// Give the model a result for the dangling call so its exchange stays valid, stating the uncertainty.
+			var session = Store.GetSession(inv.SessionId);
+			if(session is null) continue;
+			var hasResult = Store.Items(inv.SessionId).Any(i => i.Kind == ItemKinds.ToolResult && JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!.CallId == inv.CallId);
+			if(hasResult) continue;
+			var text = wasQueued ? $"NOT EXECUTED: {inv.ToolName} was queued but not admitted before restart (invocation {inv.Id}); no tool side effect from this call." :
+				$"OUTCOME UNKNOWN: the runtime restarted while {inv.ToolName} was running (invocation {inv.Id}). " +
+				(culprit ? "The supervisor terminated the runtime because this invocation exceeded its deadline. Do not simply retry it; find a bounded approach. " : "") +
+				"Any side effects may or may not have happened. Check the destination state before relying on or repeating it.";
+			Db.Write(u => Store.AppendItem(u, inv.SessionId, ItemKinds.ToolResult, new ToolResultPayload {
+				CallId = inv.CallId, ToolName = inv.ToolName, ToolVersion = inv.ToolVersion, InvocationId = inv.Id, IsError = true, Text = text, Chars = text.Length,
+				Description = wasQueued ? "not executed after restart" : "outcome unknown after restart",
+			}, Tokens.Estimate(text)));
+			// Fill any other unanswered calls from the same assistant message as not started.
+			FillUnansweredCalls(inv.SessionId);
+		}
+		foreach(var session in Store.ActiveSessions())
+			if(!Maintenance.Fenced) FillUnansweredCalls(session.Id);
+		foreach(var req in Store.ModelRequestsInState("dispatched")) {
+			Db.Write(u => {
+				req.State = "unknown";
+				req.Error = "Runtime stopped while the request was in flight; usage is estimated pending reconciliation.";
+				req.FinishedAt = Clock.Now;
+				Store.UpdateModelRequest(u, req);
+				var quote = JsonUtil.Deserialize<Quote>(req.Quote)!;
+				var uncertain = new Usage { InputTokens = quote.EstimatedInputTokens, Reported = false };
+				var charge = Pricing.Settle(quote, uncertain, Quotas.Commit(u, req.Id, uncertain));
+				Ledger.Settle(u, req, charge with { CashBasis = charge.CashNanos is null ? "unknown" : "estimated" }, req.Purpose == "turn" ? "direct" : req.Purpose, null);
+				u.Journal("model.reconciled", req.ProjectId, "model_request", req.Id, req.AgentId, new { state = "unknown" });
+			});
+		}
+		Db.Write(u => u.Execute("UPDATE sessions SET state='idle' WHERE state='running'"));
+		if(restartReason is not null) File.Delete(RestartReasonPath);
+	}
+
+	void FillUnansweredCalls(string sessionId) {
+		var items = Store.Items(sessionId);
+		var lastAssistant = items.LastOrDefault(i => i.Kind == ItemKinds.Assistant);
+		if(lastAssistant is null) return;
+		var a = JsonUtil.Deserialize<AssistantPayload>(lastAssistant.Payload)!;
+		var answered = items.Where(i => i.Seq > lastAssistant.Seq && i.Kind == ItemKinds.ToolResult).Select(i => JsonUtil.Deserialize<ToolResultPayload>(i.Payload)!.CallId).ToHashSet();
+		foreach(var call in a.ToolCalls.Where(c => !answered.Contains(c.Id))) {
+			// Any persisted admitted invocation may have caused side effects, including one
+			// marked succeeded/failed just before the separately committed result was lost.
+			var prior = Store.Db.Read(c => Dapper.SqlMapper.QueryFirstOrDefault<ToolInvocation>(c,
+				"SELECT * FROM tool_invocations WHERE session_id=@sessionId AND call_id=@callId ORDER BY created_at DESC LIMIT 1", new { sessionId, callId = call.Id }));
+			if(prior is null && Db.Read(c => c.ExecuteScalar<int>("SELECT COUNT(*) FROM maintenance_pending_calls WHERE session_id=@sid AND call_id=@id", new { sid = sessionId, id = call.Id })) > 0) continue;
+			var uncertain = prior is not null && prior.State != InvocationStates.Queued && prior.State != InvocationStates.Canceled;
+			var text = uncertain ? $"OUTCOME UNKNOWN: {call.Name} was admitted before interruption (invocation {prior!.Id}); inspect side effects before retrying." :
+				$"NOT EXECUTED: the runtime restarted before {call.Name} ran. It had no effect; call it again if still needed.";
+			Db.Write(u => Store.AppendItem(u, sessionId, ItemKinds.ToolResult, new ToolResultPayload {
+				CallId = call.Id, ToolName = call.Name, ToolVersion = prior?.ToolVersion ?? "unknown", InvocationId = prior?.Id ?? "none", IsError = true, Text = text, Chars = text.Length, Description = uncertain ? "outcome unknown" : "not executed",
+			}, Tokens.Estimate(text)));
+		}
+	}
+
+	public string RestartReasonPath => Path.Combine(Options.Home, "runtime", "restart-reason.json");
+	public sealed record RestartReason(string? InvocationId, string Reason, long At);
+	RestartReason? ReadRestartReason() {
+		try { return File.Exists(RestartReasonPath) ? JsonUtil.Deserialize<RestartReason>(File.ReadAllText(RestartReasonPath)) : null; } catch { return null; }
+	}
+
+	/// <summary>Stops dispatching new steps and waits for sessions to reach safe boundaries.</summary>
+	public sealed record DrainOutcome(bool Drained, IReadOnlyList<string> Running);
+
+	public async Task<bool> DrainAsync(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+		(await DrainWithStatusAsync(timeout, cancellationToken)).Drained;
+
+	public async Task<DrainOutcome> DrainWithStatusAsync(TimeSpan timeout, CancellationToken cancellationToken = default) {
+		long epoch;
+		lock(AdmissionGate) {
+			if(Draining) throw new DomainException("A drain is already active; undrain it before starting another.");
+			if(Maintenance.Fenced && !Maintenance.Status().VerifiedQuiescent) throw new DomainException("Maintenance is still collecting checkpoints; drain cannot discard admitted work.");
+			Draining = true;
+			epoch = ++DrainEpoch;
+		}
+		var drained = false;
+		try {
+			Db.Write(u => u.Journal("runtime.draining", null, payload: new { timeout_ms = timeout.TotalMilliseconds }));
+			var deadline = DateTime.UtcNow + timeout;
+			while(true) {
+				cancellationToken.ThrowIfCancellationRequested();
+				lock(AdmissionGate) {
+					var running = Hosts.Values.Where(h => h.IsRunning).Select(h => h.SessionId).Concat(AdmittedMutations).ToArray();
+					if(epoch != DrainEpoch) return new(false, running); // Explicit undrain superseded this request.
+					if(running.Length == 0) {
+						drained = true;
+						return new(true, running);
+					}
+					if(DateTime.UtcNow >= deadline) return new(false, running);
+				}
+				await Task.Delay(100, cancellationToken);
+			}
+		} finally {
+			if(!drained) ResumeAfterDrain(epoch);
+		}
+	}
+
+	public void Undrain() => ResumeAfterDrain(null);
+
+	void ResumeAfterDrain(long? expectedEpoch) {
+		lock(AdmissionGate) {
+			if(expectedEpoch is not null && expectedEpoch != DrainEpoch) return;
+			Draining = false;
+			++DrainEpoch;
+		}
+		// Wake may have been suppressed before a host existed. Reconcile durable work as well as hosts.
+		foreach(var agent in Store.ListLiveAgents())
+			if(agent.PrimarySessionId is { } sessionId && !IsPaused(sessionId)) Wake(agent.Id);
+		foreach(var h in Hosts.Values) h.Wake();
+	}
+
+	Timer? ExpiryTimer;
+	List<McpClient> McpClients = [];
+
+	public void Dispose() {
+		ExpiryTimer?.Dispose();
+		// Closing the browser manager first prevents a session host from starting a new browser during
+		// shutdown. Its disposal is asynchronous (CDP close + process exit) but bounded for sync callers.
+		if(BrowserManager.TryFor(this, out var browsers)) {
+			try { browsers!.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult(); }
+			catch(Exception e) { Console.Error.WriteLine($"Browser shutdown incomplete: {e.Message}"); }
+		}
+		foreach(var host in Hosts.Values) {
+			try { host.Dispose(); } catch(Exception e) { Console.Error.WriteLine($"Session shutdown incomplete: {e.Message}"); }
+		}
+		foreach(var client in McpClients) {
+			try { client.DisposeAsync().AsTask().Wait(3000); } catch(Exception e) { Console.Error.WriteLine($"MCP shutdown incomplete: {e.Message}"); }
+		}
+		Hosts.Clear();
+		Db.Write(u => {
+			u.Execute("UPDATE runtime_generations SET stopped_at=@now, stop_reason='clean' WHERE generation=@Generation", new { now = Clock.Now, Generation });
+			u.Journal("runtime.stopped", null, payload: new { Generation });
+		});
+	}
+
+	// ---- Hosts ----
+
+	public SessionHost? GetHost(string sessionId) {
+		lock(AdmissionGate) {
+			if(Maintenance.Fenced || Maintenance.HasUnknown(sessionId)) return null;
+			if(Hosts.TryGetValue(sessionId, out var h)) return h;
+			var session = Store.GetSession(sessionId);
+			if(session is null || session.State == "finished") return null;
+			var host = new SessionHost(this, session);
+			Hosts[sessionId] = host;
+			host.Delta += (sid, d) => Delta?.Invoke(sid, d);
+			return host;
+		}
+	}
+
+	public IReadOnlyCollection<SessionHost> LiveHosts => Hosts.Values.ToList();
+
+	public void Wake(string agentId) {
+		if(Draining || Maintenance.Fenced) return;
+		var agent = Store.GetAgent(agentId);
+		if(agent?.PrimarySessionId is null || !AgentStates.IsLive(agent.State)) return;
+		GetHost(agent.PrimarySessionId)?.Wake();
+	}
+
+	void ReleaseHost(string sessionId) {
+		if(Hosts.TryRemove(sessionId, out var host))
+			// Disposal must not run on the host's own thread while it is still unwinding.
+			_ = Task.Run(() => host.Dispose());
+	}
+
+	public bool IsPaused(string sessionId) {
+		var s = Store.GetSession(sessionId);
+		if(s is null) return true;
+		return s.State == "paused" || Store.GetAgent(s.AgentId)?.State == AgentStates.Paused || ActivePause(sessionId) is not null;
+	}
+
+	// ---- Policy and context ----
+
+	public ContextPolicy PolicyFor(Agent agent, Session session) =>
+		Options.PolicyOverride?.Invoke(agent, session) ?? (agent.Lifetime == Lifetimes.Ephemeral ? Options.EphemeralPolicy : Options.PersistentPolicy);
+
+	public ContextViewState CurrentView(string sessionId) =>
+		Store.CurrentView(sessionId) is { } v ? JsonUtil.Deserialize<ContextViewState>(v.State)! : new ContextViewState();
+
+	public BuiltContext BuildContext(SessionHost host, ContextPolicy policy) {
+		var session = host.Session;
+		var agent = host.Agent;
+		var view = CurrentView(session.Id);
+		var items = Store.Items(session.Id);
+		var summary = view.SummaryItemId is null ? null : items.FirstOrDefault(i => i.Id == view.SummaryItemId);
+		return ContextBuilder.Build(Prompts.System(this, agent, session, host), view, items, summary, session.TurnCount, policy, session.TokenRatio, session.ContextRevision);
+	}
+
+	public void CommitView(string sessionId, ContextViewState view, string reason) =>
+		Db.Write(u => Store.CommitView(u, sessionId, JsonUtil.Serialize(view), reason));
+
+	public void InitializeToolCache(SessionHost host, Agent agent, ContextPolicy policy) {
+		var names = Tools.DefaultsFor(agent);
+		host.Cache.Load(ToolRegistry.CoreTools, policy.ToolTokenBudget, pinned: true);
+		var goal = $"{agent.Title} {agent.Instructions} {host.Session.Purpose}";
+		var extra = Tools.Search(host.Session.ProjectId, goal, 6).Select(x => x.Tool.Name).Where(n => !names.Contains(n)).Take(3);
+		host.Cache.Load(names.Concat(extra), policy.ToolTokenBudget);
+	}
+
+	public bool ToolAllowed(Agent agent, Session session, string tool) {
+		if(session.Kind == "service")
+			return Prompts.ServiceTools.Contains(tool);
+		return tool switch {
+			"reply_to_user" => agent.ManagerId is null && session.Kind == "primary",
+			"create_agent" or "retire_agent" or "reassign_agent" or "assign_work" or "pause_agent" or "resume_agent" or "activate_release" => agent.Role == Roles.Manager,
+			_ => true,
+		};
+	}
+
+	public string? CurrentObjective(string agentId) => Db.Read(c => c.ExecuteScalar<string?>(
+		"SELECT id FROM objectives WHERE owner_id=@agentId AND state IN ('active','verifying','ready','blocked') ORDER BY updated_at DESC LIMIT 1", new { agentId }));
+
+	public string? SponsorFor(Session session) =>
+		session.Kind is "consultation" or "service" && JsonUtil.Parse(session.Purpose)?["requester_agent_id"]?.GetValue<string>() is { } r ? r : null;
+
+	// ---- Turn completion and failure handling ----
+
+	public void OnTurnFinished(SessionHost host, string? content) {
+		Failures.TryRemove(host.SessionId, out _);
+		var session = host.Session;
+		var agent = host.Agent;
+		if(session.Kind == "primary") WorkContinuity.Finished(this, agent.Id);
+		if(session.Kind == "consultation") {
+			FinishConsultation(host, session, agent, content);
+			return;
+		}
+		if(session.Kind == "service") {
+			FinishService(host, session, content);
+			return;
+		}
+		if(agent.Lifetime == Lifetimes.Ephemeral) {
+			FinishEphemeral(host, session, agent, content);
+			return;
+		}
+		if(agent.ManagerId is null && !string.IsNullOrWhiteSpace(content))
+			Db.Write(u => Store.AppendConversation(u, agent.ProjectId, "manager", agent.Id, content.Trim()));
+	}
+
+	public void HandleSessionFailure(SessionHost host, Exception e) {
+		var count = Failures.AddOrUpdate(host.SessionId, 1, (_, c) => c + 1);
+		var agent = host.Agent;
+		var retryable = e is ProviderException { Retryable: true, MayHaveBilled: false } && count < 5;
+		Db.Write(u => u.Journal("session.failed", agent.ProjectId, "session", host.SessionId, agent.Id, new { error = TextUtil.Truncate(e.ToString(), 2000), attempt = count, retryable }));
+		Console.Error.WriteLine($"[{agent.Name}] step failed (attempt {count}): {e.Message}");
+		if(retryable) {
+			_ = Task.Delay(TimeSpan.FromSeconds(Math.Min(60, 2 << count))).ContinueWith(_ => host.Wake());
+			return;
+		}
+		Failures.TryRemove(host.SessionId, out _);
+		PauseAgent(agent.Id, null, $"Execution failed and was paused: {TextUtil.Truncate(e.Message, 600)}");
+	}
+
+	public void HandleBudgetExhausted(SessionHost host, string message) {
+		var agent = host.Agent;
+		PauseAgent(agent.Id, null, message);
+	}
+
+	public void PauseAgent(string agentId, string? actorId, string reason) {
+		var agent = Store.GetAgent(agentId)!;
+		lock(AdmissionGate) {
+			if(agent.PrimarySessionId is { } sessionId && Hosts.TryGetValue(sessionId, out var host)) host.InvalidateStep();
+			Db.Write(u => {
+			Store.SetAgentState(u, agentId, AgentStates.Paused);
+			u.Journal("agent.paused", agent.ProjectId, "agent", agentId, actorId, new { reason });
+			if(agent.ManagerId is { } managerId && actorId != managerId)
+				Store.InsertNotification(u, NewNotification(agent.ProjectId, NotificationTypes.Escalation, agentId, managerId, $"{agent.Name} was paused: {reason}. Resume it with resume_agent when appropriate.", null));
+			else if(agent.ManagerId is null && actorId is null)
+				Store.AppendConversation(u, agent.ProjectId, "system", agentId, $"{agent.Name} (root manager) was paused: {reason}");
+			});
+		}
+		if(agent.ManagerId is { } m) Wake(m);
+	}
+
+	public void ResumeAgent(string agentId, string? actorId) {
+		using var admission = Maintenance.Admit("resume_agent");
+		var agent = Store.GetAgent(agentId)!;
+		if(agent.PrimarySessionId is { } stoppedId && Hosts.TryGetValue(stoppedId, out var stopped) && stopped.StopRequested)
+			throw new InvalidOperationException("Stopped sessions require the targeted receipt resume path");
+		if(agent.State != AgentStates.Paused) return;
+		lock(AdmissionGate) {
+			if(agent.PrimarySessionId is { } sessionId && Hosts.TryGetValue(sessionId, out var host)) {
+				if(host.StopRequested) throw new InvalidOperationException("Stopped sessions require the targeted receipt resume path");
+				host.InvalidateStep();
+			}
+			Db.Write(u => {
+				Store.SetAgentState(u, agentId, AgentStates.Sleeping);
+				u.Journal("agent.resumed", agent.ProjectId, "agent", agentId, actorId, new { });
+			});
+		}
+		Failures.TryRemove(agent.PrimarySessionId ?? "", out _);
+		Wake(agentId);
+	}
+
+	// ---- Communication ----
+
+	public static Notification NewNotification(string projectId, string type, string? from, string to, string body, string? objectiveId, string? causalParent = null, string? dedupe = null) => new() {
+		Id = Ids.New("ntf"), ProjectId = projectId, Type = type, FromAgentId = from, ToAgentId = to, ObjectiveId = objectiveId, Body = body,
+		Wakes = NotificationTypes.Wakes(type), State = "pending", CausalParentId = causalParent, DedupeKey = dedupe, CreatedAt = Clock.Now,
+	};
+
+	public Notification Notify(string projectId, string type, string? from, string to, string body, string? objectiveId = null, string? causalParent = null, string? dedupe = null) {
+		var n = Db.Write(u => Store.InsertNotification(u, NewNotification(projectId, type, from, to, body, objectiveId, causalParent, dedupe)));
+		if(n.Wakes) Wake(to);
+		return n;
+	}
+
+	public ConversationEntry PostUserMessage(string projectId, string text) => PostUserMessage(projectId, text, null, null);
+
+	public string FormatInbox(List<Notification> pending) {
+		var sb = new StringBuilder("[Inbox]\n");
+		foreach(var n in pending) {
+			var from = n.FromAgentId is null ? (n.Type == NotificationTypes.UserMessage ? "the user" : "the runtime") : AgentLabel(n.FromAgentId);
+			sb.Append($"--- {n.Type} from {from}{(n.ObjectiveId is null ? "" : $" regarding objective {n.ObjectiveId}")} (message {n.Id}) ---\n");
+			sb.Append(n.Body.Trim()).Append("\n\n");
+		}
+		return sb.ToString().TrimEnd();
+	}
+
+	public string AgentLabel(string agentId) => Store.GetAgent(agentId) is { } a ? $"{a.Name} ({a.Id}, {a.Title})" : agentId;
+}

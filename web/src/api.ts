@@ -1,0 +1,213 @@
+export interface CostSummary {
+  cash_nanos?: number
+  cash_known_nanos: number
+  cash_unknown_count: number
+  reserved_cash_unknown_count: number
+  effective_nanos: number
+  reserved_effective_nanos: number
+  reserved_cash_nanos: number
+  budget_nanos: number
+  no_effective_limit: boolean
+  effective_limit_nanos: number | null
+  effective_remaining_nanos: number | null
+  cash_ceiling_nanos: number | null
+  cash_remaining_nanos: number | null
+  cash_remaining_status: 'no_ceiling' | 'unknown_cost' | 'known'
+}
+
+export interface Project {
+  id: string
+  name: string
+  description: string
+  workspace_path?: string
+  root_agent_id?: string
+  root_objective_id?: string
+  state: string
+  effective_budget_nanos: number
+  no_effective_limit: boolean
+  effective_limit_nanos: number | null
+  cash_ceiling_nanos: number | null
+  created_at: number
+  costs: CostSummary
+  agents: number
+}
+
+export interface Agent {
+  id: string
+  name: string
+  title: string
+  role: 'manager' | 'specialist'
+  lifetime: 'persistent' | 'ephemeral'
+  manager_id?: string
+  model_id: string
+  reasoning_effort?: string
+  state: string
+  compaction_mode: string
+  primary_session_id?: string
+  created_at: number
+  retired_at?: number
+  status?: string
+  direct_nanos: number
+  delegated_nanos: number
+  cash_direct_nanos?: number
+  consultations?: { id: string; question?: string; checkpoint?: number }[]
+  pause?: { id: string; scope: string; reason: string; release_condition: string; state: string; requester: string }
+}
+
+export interface Objective {
+  id: string
+  project_id: string
+  parent_id?: string
+  owner_id?: string
+  delegated_by_id?: string
+  title: string
+  description: string
+  completion_conditions: string
+  state: string
+  required: boolean
+  evidence: string
+  created_at: number
+  updated_at: number
+}
+
+export interface ConversationImage {
+  id: string
+  mime_type: 'image/png'
+  width: number
+  height: number
+  bytes: number
+  content_url: string
+}
+
+export interface ConversationEntry {
+  id: string
+  author: 'user' | 'manager' | 'system'
+  agent_id?: string
+  body: string
+  created_at: number
+  attachments?: ConversationImage[]
+}
+
+export interface JournalEvent {
+  id: number
+  project_id?: string
+  kind: string
+  entity_type?: string
+  entity_id?: string
+  agent_id?: string
+  payload: string
+  created_at: number
+}
+
+export interface Session {
+  id: string
+  agent_id: string
+  kind: string
+  state: string
+  model_id: string
+  compaction_mode: string
+  parent_session_id?: string
+  checkpoint_seq?: number
+  turn_count: number
+  purpose?: string
+  result?: string
+  created_at: number
+}
+
+export interface SessionItem {
+  id: string
+  seq: number
+  kind: string
+  turn: number
+  token_estimate: number
+  created_at: number
+  payload: any
+}
+
+export interface ModelInfo {
+  id: string
+  provider: string
+  display_name: string
+  input_per_million?: string
+  cached_input_per_million?: string
+  output_per_million?: string
+  billing: string
+  usable: boolean
+  engineering_usable: boolean
+  notes: string
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api/v1${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Ainur': '1' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`
+    try {
+      const j = await res.json()
+      if (j.error) message = j.error
+    } catch { /* not json */ }
+    throw new Error(message)
+  }
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
+export const api = {
+  uploadConversationImage: async (projectId: string, file: File, signal?: AbortSignal): Promise<ConversationImage> => {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/conversation/images`, {
+      method: 'POST', headers: { 'Content-Type': 'image/png', 'X-Ainur': '1' }, body: file, signal,
+    })
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`
+      try { const json = await res.json(); if (json.error) message = json.error } catch { /* not JSON */ }
+      throw new Error(message)
+    }
+    return await res.json() as ConversationImage
+  },
+  sendConversation: async (projectId: string, body: { text: string; attachment_ids: string[]; client_message_id: string }, signal?: AbortSignal): Promise<ConversationEntry> => {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/conversation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Ainur': '1' }, body: JSON.stringify(body), signal,
+    })
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`
+      try { const json = await res.json(); if (json.error) message = json.error } catch { /* not JSON */ }
+      throw new Error(message)
+    }
+    return await res.json() as ConversationEntry
+  },
+  deleteConversationImage: async (projectId: string, imageId: string): Promise<void> => {
+    const res = await fetch(`/api/v1/projects/${encodeURIComponent(projectId)}/conversation/images/${encodeURIComponent(imageId)}`, { method: 'DELETE', headers: { 'X-Ainur': '1' } })
+    if (!res.ok) throw new Error(`Image removal failed (${res.status})`)
+  },
+  get: <T,>(path: string) => request<T>('GET', path),
+  post: <T,>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
+  put: <T,>(path: string, body: unknown) => request<T>('PUT', path, body),
+  patch: <T,>(path: string, body: unknown) => request<T>('PATCH', path, body),
+}
+
+export function dollars(nanos: number | undefined | null): string {
+  if (nanos === undefined || nanos === null) return 'unknown'
+  const d = nanos / 1e9
+  if (Math.abs(d) >= 1) return `$${d.toFixed(2)}`
+  if (Math.abs(d) >= 0.01) return `$${d.toFixed(4)}`
+  return `$${d.toFixed(6)}`
+}
+
+export function ago(ms: number): string {
+  const s = Math.max(0, (Date.now() - ms) / 1000)
+  if (s < 60) return `${Math.floor(s)}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return new Date(ms).toLocaleDateString()
+}
+
+/** Subscribes to the server-sent event stream; returns an unsubscribe function. */
+export function subscribe(projectId: string | undefined, onJournal: (e: JournalEvent) => void, onDelta: (d: { session_id: string; kind: string; text: string }) => void): () => void {
+  const source = new EventSource(`/api/v1/events/stream${projectId ? `?project=${projectId}` : ''}`)
+  source.addEventListener('journal', (e) => onJournal(JSON.parse((e as MessageEvent).data)))
+  source.addEventListener('delta', (e) => onDelta(JSON.parse((e as MessageEvent).data)))
+  return () => source.close()
+}
